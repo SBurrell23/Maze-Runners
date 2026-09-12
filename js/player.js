@@ -33,7 +33,7 @@ export class LocalPlayer {
     };
     this._onLock = () => { const was = this.locked; this.locked = document.pointerLockElement === this.canvas; if (!this.locked) { this.keys.clear(); if (was) this.onUnlock?.(); } };
     this._onBlur = () => this.keys.clear();
-    this._onClick = () => { if (this.enabled && !this.locked) this.canvas.requestPointerLock?.(); };
+    this._onClick = () => this.requestLock();
     document.addEventListener('keydown', this._onKey);
     document.addEventListener('keyup', this._onKey);
     document.addEventListener('mousemove', this._onMouse);
@@ -42,7 +42,10 @@ export class LocalPlayer {
     canvas.addEventListener('click', this._onClick);
   }
 
-  requestLock() { if (this.enabled && !this.locked) this.canvas.requestPointerLock?.(); }
+  requestLock() {
+    if (!this.enabled || this.locked) return;
+    try { const p = this.canvas.requestPointerLock?.(); if (p && p.catch) p.catch(() => { /* embedded browsers may refuse pointer lock; arrows/Q/E still turn */ }); } catch (e) { /* same */ }
+  }
 
   setEnabled(on) {
     this.enabled = on;
