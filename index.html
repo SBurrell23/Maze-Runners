@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maze Runners</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Maze Runners – a peer-to-peer multiplayer 3D hedge maze race. Up to 6 floating eyeballs, one exit.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23f4f1e8'/%3E%3Ccircle cx='32' cy='32' r='14' fill='%233a8f5c'/%3E%3Ccircle cx='32' cy='32' r='6' fill='%23111'/%3E%3Ccircle cx='27' cy='27' r='3' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+
+  <!-- ===== MAIN MENU ===== -->
+  <section id="screen-menu" class="screen">
+    <div class="panel">
+      <h1 class="title"><span class="eye"></span>MAZE RUNNERS</h1>
+      <p class="tagline">Six eyeballs. One exit. Absurdly tall hedges.</p>
+      <label class="field">
+        <span>Your name</span>
+        <input id="name-input" maxlength="14" placeholder="Eyeball" autocomplete="off">
+      </label>
+      <div class="row">
+        <button id="btn-host" class="primary">Host a game</button>
+        <button id="btn-solo">Solo run</button>
+      </div>
+      <div class="row join-row">
+        <input id="code-input" maxlength="6" placeholder="ROOM CODE" autocomplete="off" spellcheck="false">
+        <button id="btn-join">Join</button>
+      </div>
+      <p class="hint">WASD / arrows to move · mouse to look · Shift to sprint · M to mute</p>
+      <p class="hint" id="menu-status"></p>
+    </div>
+  </section>
+
+  <!-- ===== LOBBY ===== -->
+  <section id="screen-lobby" class="screen hidden">
+    <div class="panel wide">
+      <div class="lobby-head">
+        <h2>Lobby</h2>
+        <div class="room-code" id="room-code" title="Click to copy">----</div>
+        <button id="btn-leave" class="ghost">Leave</button>
+      </div>
+      <div class="lobby-body">
+        <div class="players">
+          <h3>Players <span id="player-count">0/6</span></h3>
+          <ul id="player-list"></ul>
+          <button id="btn-ready">I'm ready</button>
+          <p class="hint" id="lobby-solo-hint">Share the room code, or start alone for a solo run.</p>
+        </div>
+        <div class="settings" id="settings">
+          <h3>Maze settings <span id="settings-lock" class="tag">host only</span></h3>
+          <label>Width <output id="o-width">20</output><input type="range" id="s-width" min="6" max="45" value="20" data-setting="width"></label>
+          <label>Height <output id="o-height">20</output><input type="range" id="s-height" min="6" max="45" value="20" data-setting="height"></label>
+          <label>Hedge height <output id="o-hedge">35</output><input type="range" id="s-hedge" min="10" max="90" value="35" data-setting="hedge"></label>
+          <label>Extra openings <output id="o-braid">10</output><input type="range" id="s-braid" min="0" max="40" value="10" data-setting="braid"></label>
+          <label>Hint signs <output id="o-signs">8</output><input type="range" id="s-signs" min="0" max="30" value="8" data-setting="signs"></label>
+          <label>Honest signs <output id="o-honest">80</output><input type="range" id="s-honest" min="0" max="100" value="80" data-setting="honest"></label>
+          <label>Torches <output id="o-torches">50</output><input type="range" id="s-torches" min="0" max="100" value="50" data-setting="torches"></label>
+          <label>Time of day
+            <select id="s-time" data-setting="time">
+              <option value="dawn">Dawn</option>
+              <option value="day">Day</option>
+              <option value="dusk" selected>Dusk</option>
+              <option value="night">Night</option>
+              <option value="cycle">Cycling</option>
+            </select>
+          </label>
+          <h3>Local</h3>
+          <label>Shadows <input type="checkbox" id="l-shadows" checked></label>
+          <label>Volume <input type="range" id="l-volume" min="0" max="100" value="70"></label>
+        </div>
+      </div>
+      <div class="lobby-foot">
+        <span id="lobby-status">Waiting for host to start…</span>
+        <button id="btn-start" class="primary hidden">Start race</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== LOADING ===== -->
+  <section id="screen-loading" class="screen hidden">
+    <div class="panel small"><h2 id="loading-text">Growing hedges…</h2></div>
+  </section>
+
+  <!-- ===== HUD ===== -->
+  <div id="hud" class="hidden">
+    <div id="hud-top">
+      <div id="hud-timer">00:00.0</div>
+      <div id="hud-escaped"></div>
+    </div>
+    <div id="compass"><div id="compass-strip"></div><div class="needle"></div></div>
+    <div id="crosshair"></div>
+    <div id="countdown" class="hidden">3</div>
+    <div id="banner" class="hidden"></div>
+    <div id="hud-hint">Click to look around · WASD move · Shift sprint · Esc release mouse</div>
+    <div id="finish-card" class="hidden">
+      <h2 id="finish-title">You escaped!</h2>
+      <p id="finish-sub"></p>
+      <ol id="finish-ranks"></ol>
+      <button id="btn-back-lobby" class="primary hidden">Back to lobby</button>
+      <p class="hint" id="finish-wait">Waiting for the host…</p>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
