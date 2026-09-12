@@ -31,7 +31,7 @@ export class LocalPlayer {
       this.pitch -= e.movementY * 0.0022;
       this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch));
     };
-    this._onLock = () => { this.locked = document.pointerLockElement === this.canvas; if (!this.locked) this.keys.clear(); };
+    this._onLock = () => { const was = this.locked; this.locked = document.pointerLockElement === this.canvas; if (!this.locked) { this.keys.clear(); if (was) this.onUnlock?.(); } };
     this._onBlur = () => this.keys.clear();
     this._onClick = () => { if (this.enabled && !this.locked) this.canvas.requestPointerLock?.(); };
     document.addEventListener('keydown', this._onKey);
@@ -41,6 +41,8 @@ export class LocalPlayer {
     window.addEventListener('blur', this._onBlur);
     canvas.addEventListener('click', this._onClick);
   }
+
+  requestLock() { if (this.enabled && !this.locked) this.canvas.requestPointerLock?.(); }
 
   setEnabled(on) {
     this.enabled = on;

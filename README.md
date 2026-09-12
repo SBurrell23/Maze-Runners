@@ -14,6 +14,8 @@ floating eyeball, the hedges are absurdly tall, and the first one out of the exi
 - **Everything is generated.** Hedge, ground, bark, vine, moss, sign, eyeball and cloud textures are painted
   onto canvases at load time. All sound and music is synthesised with the Web Audio API. There are no assets.
 - **Solo mode.** "Solo run" skips the network entirely so you can test-drive mazes and settings alone.
+- **Fog-of-war minimap.** Only corridors you have walked or seen are drawn. Other eyeballs show up only inside explored cells.
+- **Wheat fields forever.** One instanced, wind-swayed mesh of 16k wheat quads plus a golden ground and fog make the world outside the hedges look endless at almost no GPU cost.
 
 ## Lobby settings
 
@@ -30,7 +32,7 @@ floating eyeball, the hedges are absurdly tall, and the first one out of the exi
 ## Controls
 
 `WASD` / arrows move · mouse looks (click to capture) · `Shift` sprints · `Q`/`E` or arrows turn without
-mouse capture · `M` mutes · `Esc` releases the mouse.
+mouse capture · `M` mutes · `Tab` toggles the minimap · `Esc` opens the in-race menu (sound, shadows, minimap, abandon).
 
 ## Running locally
 

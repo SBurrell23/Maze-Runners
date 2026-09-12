@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { generateMaze } from './maze.js';
+import { generateMaze, DIRS } from './maze.js';
 import { World, CELL } from './world.js';
 import { Sky } from './sky.js';
 import { LocalPlayer, RemotePlayer } from './player.js';
@@ -34,11 +34,12 @@ const app = {
   me: { id: 'local', name: 'Eyeball', color: COLORS[0] },
   players: [],              // {id, name, color, ready, host}
   settings: { ...DEFAULT_SETTINGS },
-  local: { shadows: true, volume: 0.7 },
+  local: { shadows: true, minimap: true, volume: 0.7, muted: false },
   audio: new AudioSys(),
   world: null, sky: null, player: null, remotes: new Map(),
-  demo: null,
+  demo: null, demoToken: 0, demoReady: false,
   race: null,
+  pauseOpen: false,
   posCache: new Map(),      // host: latest position per client
   loaded: new Set(),
   elapsed: 0,
@@ -54,15 +55,37 @@ function fmtTime(s) { const m = Math.floor(s / 60), r = s - m * 60; return `${St
 function myName() { const v = $('name-input').value.trim().slice(0, 14); return v || 'Eyeball'; }
 function findPlayer(id) { return app.players.find(p => p.id === id); }
 
+function setProgress(frac, label) {
+  for (const id of ['menu-progress', 'load-progress']) {
+    const el = $(id); el.querySelector('.fill').style.width = `${Math.round(frac * 100)}%`;
+    el.querySelector('.label').textContent = `${label} ${Math.round(frac * 100)}%`;
+  }
+}
+function setMenuEnabled(on) {
+  for (const id of ['btn-host', 'btn-solo', 'btn-join']) $(id).disabled = !on;
+  $('menu-progress').classList.toggle('done', on);
+}
+
 // ------------------------------------------------------------------ menu background
-function buildDemo() {
-  if (app.demo) return;
+async function buildDemo() {
+  if (app.demo || app.demoBuilding) return;
+  app.demoBuilding = true;
+  const token = ++app.demoToken;
+  app.demoReady = false; setMenuEnabled(false); setProgress(0, 'Loading…');
   const maze = generateMaze({ w: 11, h: 11, braid: 0.1, seed: (Math.random() * 1e9) | 0 });
   const world = new World(scene, maze, { hedge: 26, torches: 40, signs: 3, honest: 100 });
-  const sky = new Sky(scene, renderer, { mode: 'dusk', shadows: app.local.shadows, seed: maze.seed });
+  await world.build((f, l) => { if (token === app.demoToken) setProgress(f, l); });
+  app.demoBuilding = false;
+  if (token !== app.demoToken) { world.dispose(); return; } // a race started meanwhile
+  const sky = new Sky(scene, renderer, { mode: app.settings.time, shadows: app.local.shadows, seed: maze.seed });
   app.demo = { world, sky, maze, t: 0 };
+  app.demoReady = true; setMenuEnabled(true);
 }
-function disposeDemo() { if (!app.demo) return; app.demo.world.dispose(); app.demo.sky.dispose(); app.demo = null; }
+function disposeDemo() {
+  app.demoToken++;
+  if (!app.demo) return;
+  app.demo.world.dispose(); app.demo.sky.dispose(); app.demo = null;
+}
 
 // ------------------------------------------------------------------ lobby
 function renderLobby() {
@@ -77,6 +100,7 @@ function renderLobby() {
   $('room-code').textContent = app.solo ? 'SOLO' : (app.net?.code || '----');
   $('settings').classList.toggle('locked', !app.isHost);
   $('settings-lock').classList.toggle('hidden', app.isHost);
+  $('btn-reset').classList.toggle('hidden', !app.isHost);
   for (const el of document.querySelectorAll('[data-setting]')) {
     const k = el.dataset.setting; el.value = app.settings[k];
     const out = $('o-' + k); if (out) out.textContent = app.settings[k];
@@ -88,6 +112,7 @@ function renderLobby() {
   $('lobby-solo-hint').textContent = app.solo ? 'Solo run: no network needed. Tweak the maze and press start.' : 'Share the room code, or start alone for a solo run.';
   const readyCount = app.players.filter(p => p.ready).length;
   $('lobby-status').textContent = app.isHost ? `${readyCount}/${app.players.length} ready — you decide when to start.` : 'Waiting for the host to start…';
+  app.demo?.sky.setMode(app.settings.time);
 }
 
 function broadcastLobby() { if (app.isHost && app.net) app.net.broadcast('lobby', { players: app.players, settings: app.settings }); }
@@ -189,7 +214,7 @@ function wireClient(net) {
   });
   net.on('full', () => leaveToMenu('That room is full (6 players max).'));
   net.on('busy', () => leaveToMenu('That race has already started — try again after it ends.'));
-  net.on('start', (d) => startRace(d.seed, d.settings));
+  net.on('start', (d) => { if (app.state === 'lobby') startRace(d.seed, d.settings); });
   net.on('go', () => beginCountdown());
   net.on('s', (d) => {
     if (!d || !Array.isArray(d.p)) return;
@@ -211,48 +236,52 @@ function hostStart() {
   startRace(seed, app.settings);
 }
 
-function startRace(seed, settings) {
+async function startRace(seed, settings) {
   app.settings = { ...DEFAULT_SETTINGS, ...settings };
   app.state = 'loading';
-  showScreen('loading'); $('loading-text').textContent = 'Growing hedges…';
+  showScreen('loading'); $('loading-text').textContent = 'Building the maze';
+  setProgress(0, 'Starting…');
   disposeDemo();
   app.audio.stopMusic();
-  // yield a frame so the loading panel paints before the (synchronous) build
-  setTimeout(() => {
-    const s = app.settings;
-    const maze = generateMaze({ w: +s.width, h: +s.height, braid: (+s.braid) / 100, seed });
-    app.world = new World(scene, maze, { hedge: +s.hedge, torches: +s.torches, signs: +s.signs, honest: +s.honest });
-    app.sky = new Sky(scene, renderer, { mode: s.time, shadows: app.local.shadows, seed });
-    if (!app.player) app.player = new LocalPlayer(camera, canvas);
+  const s = app.settings;
+  const maze = generateMaze({ w: +s.width, h: +s.height, braid: (+s.braid) / 100, seed });
+  const world = new World(scene, maze, { hedge: +s.hedge, torches: +s.torches, signs: +s.signs, honest: +s.honest });
+  await world.build(setProgress);
+  if (app.state !== 'loading') { world.dispose(); return; } // left while loading
+  app.world = world;
+  app.sky = new Sky(scene, renderer, { mode: s.time, shadows: app.local.shadows, seed });
+  if (!app.player) {
+    app.player = new LocalPlayer(camera, canvas);
     app.player.onStep = (sprint) => app.audio.step(sprint);
-    const myIndex = Math.max(0, app.players.findIndex(p => p.id === app.me.id));
-    const sp = app.world.spawnPoint(myIndex, app.players.length);
-    app.player.place(sp.x, sp.z, sp.yaw);
-    app.player.frozen = true; app.player.setEnabled(true);
-    // remote eyeballs
-    for (const r of app.remotes.values()) { scene.remove(r.eyeball.group); r.eyeball.dispose(); }
-    app.remotes.clear();
-    app.players.forEach((p, i) => {
-      if (p.id === app.me.id) return;
-      const eye = new Eyeball(p.name, p.color, i + 1);
-      const psp = app.world.spawnPoint(i, app.players.length);
-      eye.setPose(psp.x, EYE_HEIGHT, psp.z, psp.yaw, 0);
-      scene.add(eye.group);
-      const rp = new RemotePlayer(eye);
-      rp.push(psp.x, EYE_HEIGHT, psp.z, psp.yaw, 0, performance.now() / 1000);
-      app.remotes.set(p.id, rp);
-    });
-    app.race = { seed, startTime: null, finished: [], myFinished: false };
-    $('hud-escaped').innerHTML = ''; $('finish-card').classList.add('hidden'); $('banner').classList.add('hidden');
-    $('btn-end-race').classList.toggle('hidden', !app.isHost);
-    showScreen(null); $('hud').classList.remove('hidden');
-    app.audio.startAmbience();
-    app.state = 'countdown';
-    $('countdown').classList.remove('hidden'); $('countdown').textContent = 'Waiting…'; $('countdown').classList.remove('pop');
-    if (app.isHost) checkAllLoaded(); else app.net?.send('loaded');
-    // safety: if the host never sends 'go' (shouldn't happen) start anyway
-    if (!app.isHost) app.race.goTimeout = setTimeout(() => { if (app.state === 'countdown' && !app.race.counting) beginCountdown(); }, 15000);
-  }, 60);
+    app.player.onUnlock = () => { if ((app.state === 'playing' || app.state === 'countdown') && app.race && !app.race.myFinished) openPause(); };
+  }
+  const myIndex = Math.max(0, app.players.findIndex(p => p.id === app.me.id));
+  const sp = world.spawnPoint(myIndex, app.players.length);
+  app.player.place(sp.x, sp.z, sp.yaw);
+  app.player.frozen = true; app.player.setEnabled(true);
+  for (const r of app.remotes.values()) { scene.remove(r.eyeball.group); r.eyeball.dispose(); }
+  app.remotes.clear();
+  app.players.forEach((p, i) => {
+    if (p.id === app.me.id) return;
+    const eye = new Eyeball(p.name, p.color, i + 1);
+    const psp = world.spawnPoint(i, app.players.length);
+    eye.setPose(psp.x, EYE_HEIGHT, psp.z, psp.yaw, 0);
+    scene.add(eye.group);
+    const rp = new RemotePlayer(eye);
+    rp.push(psp.x, EYE_HEIGHT, psp.z, psp.yaw, 0, performance.now() / 1000);
+    app.remotes.set(p.id, rp);
+  });
+  app.race = { seed, startTime: null, finished: [], myFinished: false, revealed: new Uint8Array(maze.w * maze.h) };
+  revealAround();
+  $('hud-escaped').innerHTML = ''; $('finish-card').classList.add('hidden'); $('banner').classList.add('hidden');
+  $('btn-end-race').classList.toggle('hidden', !app.isHost);
+  $('minimap').classList.toggle('hidden', !app.local.minimap);
+  showScreen(null); $('hud').classList.remove('hidden');
+  app.audio.startAmbience();
+  app.state = 'countdown';
+  $('countdown').classList.remove('hidden'); $('countdown').textContent = 'Waiting…'; $('countdown').classList.remove('pop');
+  if (app.isHost) checkAllLoaded(); else app.net?.send('loaded');
+  if (!app.isHost) app.race.goTimeout = setTimeout(() => { if (app.state === 'countdown' && !app.race.counting) beginCountdown(); }, 15000);
 }
 
 function checkAllLoaded() {
@@ -274,7 +303,7 @@ function beginCountdown() {
     if (n > 0) { el.textContent = String(n); app.audio.countdown(n); n--; setTimeout(tick, 1000); }
     else {
       el.textContent = 'GO!'; app.audio.countdown(0);
-      app.state = 'playing'; app.player.frozen = false;
+      app.state = 'playing'; if (!app.pauseOpen) app.player.frozen = false;
       app.race.startTime = app.elapsed;
       app.audio.startMusic('game');
       setTimeout(() => el.classList.add('hidden'), 900);
@@ -306,6 +335,7 @@ function onFinishEvent(ev) {
   if (mine) {
     app.race.myFinished = true;
     app.player.frozen = true;
+    closePause(false);
     if (ev.rank === 1) app.audio.win(); else app.audio.chime();
     $('finish-title').textContent = ev.rank === 1 ? 'You escaped first!' : `You escaped #${ev.rank}`;
     $('finish-sub').textContent = `Time ${fmtTime(ev.time)}`;
@@ -329,6 +359,7 @@ function endRace(silent = false) {
   for (const id of [...app.remotes.keys()]) removeRemote(id);
   if (app.player) app.player.setEnabled(false);
   app.race = null; app.posCache.clear();
+  closePause(false);
   app.audio.stopAmbience();
   if (!silent) app.audio.stopMusic();
   $('hud').classList.add('hidden'); $('finish-card').classList.add('hidden'); $('countdown').classList.add('hidden');
@@ -340,6 +371,107 @@ function hostReturnToLobby() {
   endRace(); enterLobby();
 }
 
+// ------------------------------------------------------------------ pause / settings menu (Esc)
+function syncLocalInputs() {
+  $('l-shadows').checked = $('p-shadows').checked = app.local.shadows;
+  $('l-minimap').checked = $('p-minimap').checked = app.local.minimap;
+  $('l-volume').value = $('p-volume').value = Math.round(app.local.volume * 100);
+  $('p-mute').checked = app.local.muted;
+}
+function applyLocal() {
+  app.sky?.setShadows(app.local.shadows); app.demo?.sky.setShadows(app.local.shadows);
+  $('minimap').classList.toggle('hidden', !app.local.minimap || !app.race);
+  app.audio.setVolume(app.local.volume);
+  if (app.audio.muted !== app.local.muted) app.audio.toggleMute();
+  syncLocalInputs();
+}
+function openPause() {
+  if (!app.race || app.pauseOpen) return;
+  app.pauseOpen = true;
+  syncLocalInputs();
+  $('btn-abandon').textContent = app.isHost ? (app.players.length > 1 ? 'End race for everyone' : 'Abandon run') : 'Abandon race';
+  $('pause').classList.remove('hidden');
+  app.player.frozen = true;
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+function closePause(relock = true) {
+  if (!app.pauseOpen) return;
+  app.pauseOpen = false;
+  $('pause').classList.add('hidden');
+  if (app.race && app.state === 'playing' && !app.race.myFinished) app.player.frozen = false;
+  if (relock) app.player?.requestLock();
+}
+
+// ------------------------------------------------------------------ minimap (fog of war)
+const mm = $('minimap'), mctx = mm.getContext('2d');
+const MM_VIEW = 13; // cells across the minimap window
+
+/** Mark the player's cell and everything visible down open corridors as explored. */
+function revealAround() {
+  if (!app.race || !app.world) return;
+  const { w, h, walls } = app.world.maze;
+  const c = app.world.cellAt(app.player.pos.x, app.player.pos.z);
+  if (!app.world.isInside(c.cx, c.cy)) return;
+  const rev = app.race.revealed;
+  rev[c.cy * w + c.cx] = 1;
+  for (const d of DIRS) {
+    let x = c.cx, y = c.cy;
+    for (let k = 0; k < 6; k++) {
+      if (walls[y * w + x] & d.bit) break;
+      x += d.dx; y += d.dy;
+      if (x < 0 || y < 0 || x >= w || y >= h) break;
+      rev[y * w + x] = 1;
+    }
+  }
+}
+
+function drawMinimap() {
+  if (!app.race || !app.world || !app.local.minimap) return;
+  const { w, h, walls, end, start } = app.world.maze;
+  const rev = app.race.revealed;
+  const S = mm.width, cs = S / MM_VIEW;
+  const px = app.player.pos.x / CELL, pz = app.player.pos.z / CELL;
+  const ox = px - MM_VIEW / 2, oz = pz - MM_VIEW / 2;
+  mctx.clearRect(0, 0, S, S);
+  mctx.fillStyle = 'rgba(6,12,8,0.7)'; mctx.fillRect(0, 0, S, S);
+  const x0 = Math.floor(ox) - 1, y0 = Math.floor(oz) - 1;
+  mctx.lineWidth = 2; mctx.lineCap = 'round';
+  for (let cy = y0; cy <= y0 + MM_VIEW + 2; cy++) for (let cx = x0; cx <= x0 + MM_VIEW + 2; cx++) {
+    if (cx < 0 || cy < 0 || cx >= w || cy >= h || !rev[cy * w + cx]) continue;
+    const sx = (cx - ox) * cs, sy = (cy - oz) * cs;
+    const isEnd = cx === end.x && cy === end.y, isStart = cx === start.x && cy === start.y;
+    mctx.fillStyle = isEnd ? 'rgba(95,211,138,0.85)' : isStart ? 'rgba(90,140,220,0.6)' : 'rgba(205,180,130,0.78)';
+    mctx.fillRect(sx, sy, cs + 0.5, cs + 0.5);
+    const c = walls[cy * w + cx];
+    mctx.strokeStyle = '#1e4d2a';
+    mctx.beginPath();
+    if (c & 1) { mctx.moveTo(sx, sy); mctx.lineTo(sx + cs, sy); }
+    if (c & 4) { mctx.moveTo(sx, sy + cs); mctx.lineTo(sx + cs, sy + cs); }
+    if (c & 8) { mctx.moveTo(sx, sy); mctx.lineTo(sx, sy + cs); }
+    if (c & 2) { mctx.moveTo(sx + cs, sy); mctx.lineTo(sx + cs, sy + cs); }
+    mctx.stroke();
+  }
+  // other eyeballs, only where you have explored
+  for (const [id, r] of app.remotes) {
+    if (!r.cur) continue;
+    const cx = Math.floor(r.cur.x / CELL), cy = Math.floor(r.cur.z / CELL);
+    if (cx < 0 || cy < 0 || cx >= w || cy >= h || !rev[cy * w + cx]) continue;
+    const sx = (r.cur.x / CELL - ox) * cs, sy = (r.cur.z / CELL - oz) * cs;
+    if (sx < 0 || sy < 0 || sx > S || sy > S) continue;
+    mctx.fillStyle = findPlayer(id)?.color || '#fff';
+    mctx.beginPath(); mctx.arc(sx, sy, 4, 0, 6.28); mctx.fill();
+    mctx.strokeStyle = '#000'; mctx.lineWidth = 1; mctx.stroke();
+  }
+  // you: an arrow in the centre pointing where you look
+  const yaw = app.player.yaw, ang = Math.atan2(-Math.cos(yaw), -Math.sin(yaw));
+  mctx.save(); mctx.translate(S / 2, S / 2); mctx.rotate(ang);
+  mctx.fillStyle = '#f0b64a'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1.5;
+  mctx.beginPath(); mctx.moveTo(7, 0); mctx.lineTo(-5, 5); mctx.lineTo(-3, 0); mctx.lineTo(-5, -5); mctx.closePath(); mctx.fill(); mctx.stroke();
+  mctx.restore();
+  // north tick
+  mctx.fillStyle = 'rgba(255,255,255,0.6)'; mctx.font = 'bold 11px sans-serif'; mctx.textAlign = 'center'; mctx.fillText('N', S / 2, 13);
+}
+
 // ------------------------------------------------------------------ HUD
 const compassStrip = $('compass-strip');
 {
@@ -348,14 +480,18 @@ const compassStrip = $('compass-strip');
   for (let r = 0; r < 3; r++) for (const l of labels) html += `<span class="${l.length === 1 ? 'major' : ''}">${l}</span>`;
   compassStrip.innerHTML = html;
 }
+let lastCell = -1;
 function updateHUD() {
   if (!app.race) return;
   const t = app.race.startTime == null ? 0 : (app.race.myFinished ? app.race.finished.find(f => f.id === app.me.id)?.time ?? 0 : app.elapsed - app.race.startTime);
   $('hud-timer').textContent = fmtTime(t);
   const heading = ((-app.player.yaw * 180 / Math.PI) % 360 + 360) % 360; // 0 = north (-Z), 90 = east (+X)
   compassStrip.style.transform = `translateX(${130 - 480 - heading / 45 * 60}px)`;
+  const c = app.world.cellAt(app.player.pos.x, app.player.pos.z);
+  const key = c.cy * 10000 + c.cx;
+  if (key !== lastCell) { lastCell = key; revealAround(); }
+  drawMinimap();
 }
-
 
 // Network tick runs on a timer (not rAF) so a backgrounded host keeps relaying state.
 function netTick() {
@@ -395,14 +531,11 @@ function loop(now) {
     app.world.update(dt, app.player.pos);
     app.sky.apply(app.elapsed, app.player.pos);
     for (const r of app.remotes.values()) r.update(dt, nowS, app.elapsed);
-
-    // finish detection
     if (app.state === 'playing' && app.race && !app.race.myFinished && app.world.isOutside(app.player.pos.x, app.player.pos.z)) {
       app.race.myFinished = true;
       const time = app.elapsed - app.race.startTime;
       if (app.isHost) hostFinish(app.me.id, time); else app.net.send('finished', { time });
     }
-    // audio ambience
     const st = app.sky.state;
     const torchD = app.world.nearestTorchDist ?? 99;
     app.audio.tick(dt, { night: st.night, day: st.dayF, torch: Math.max(0, 1 - torchD / 14) });
@@ -425,6 +558,12 @@ $('btn-ready').addEventListener('click', () => {
   if (app.isHost) broadcastLobby(); else app.net?.send('ready', me.ready);
 });
 $('btn-start').addEventListener('click', () => { app.audio.click(); hostStart(); });
+$('btn-reset').addEventListener('click', () => {
+  if (!app.isHost) return;
+  app.audio.click();
+  app.settings = { ...DEFAULT_SETTINGS };
+  renderLobby(); broadcastLobby(); toast('Settings reset to defaults', 1500);
+});
 $('btn-back-lobby').addEventListener('click', () => { app.audio.click(); hostReturnToLobby(); });
 $('room-code').addEventListener('click', () => { if (app.net?.code) navigator.clipboard?.writeText(app.net.code).then(() => toast('Room code copied')); });
 for (const el of document.querySelectorAll('[data-setting]')) {
@@ -433,12 +572,20 @@ for (const el of document.querySelectorAll('[data-setting]')) {
     const k = el.dataset.setting;
     app.settings[k] = el.tagName === 'SELECT' ? el.value : +el.value;
     const out = $('o-' + k); if (out) out.textContent = app.settings[k];
+    if (k === 'time') app.demo?.sky.setMode(app.settings.time);
     broadcastLobby();
   });
 }
-$('l-shadows').addEventListener('change', (e) => { app.local.shadows = e.target.checked; app.sky?.setShadows(app.local.shadows); app.demo?.sky.setShadows(app.local.shadows); });
-$('l-volume').addEventListener('input', (e) => { app.local.volume = e.target.value / 100; app.audio.setVolume(app.local.volume); });
-// host-only "end race" button lives in the HUD
+// local settings (lobby + pause menu share the same state)
+for (const id of ['l-shadows', 'p-shadows']) $(id).addEventListener('change', (e) => { app.local.shadows = e.target.checked; applyLocal(); });
+for (const id of ['l-minimap', 'p-minimap']) $(id).addEventListener('change', (e) => { app.local.minimap = e.target.checked; applyLocal(); });
+for (const id of ['l-volume', 'p-volume']) $(id).addEventListener('input', (e) => { app.local.volume = e.target.value / 100; applyLocal(); });
+$('p-mute').addEventListener('change', (e) => { app.local.muted = e.target.checked; applyLocal(); });
+$('btn-resume').addEventListener('click', () => { app.audio.click(); closePause(true); });
+$('btn-abandon').addEventListener('click', () => {
+  app.audio.click();
+  if (app.isHost) hostReturnToLobby(); else leaveToMenu('You left the race.');
+});
 {
   const b = document.createElement('button'); b.id = 'btn-end-race'; b.textContent = 'End race'; b.className = 'hidden';
   b.style.cssText = 'position:absolute;top:14px;right:16px;pointer-events:auto;font-size:13px;padding:6px 12px;';
@@ -447,10 +594,13 @@ $('l-volume').addEventListener('input', (e) => { app.local.volume = e.target.val
 }
 document.addEventListener('keydown', (e) => {
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
-  if (e.code === 'KeyM') { const m = app.audio.toggleMute(); toast(m ? 'Muted' : 'Sound on', 1200); }
+  if (e.code === 'KeyM') { app.local.muted = !app.local.muted; applyLocal(); toast(app.local.muted ? 'Muted' : 'Sound on', 1200); }
+  if (e.code === 'Tab' && app.race) { e.preventDefault(); app.local.minimap = !app.local.minimap; applyLocal(); }
+  if ((e.code === 'Escape' || e.key === 'Escape') && app.race) { if (app.pauseOpen) closePause(true); else if (!app.player.locked && !app.race.myFinished) openPause(); }
 });
 window.addEventListener('beforeunload', () => { app.net?.close(); });
 
+syncLocalInputs();
 buildDemo();
 showScreen('menu');
 requestAnimationFrame(loop);

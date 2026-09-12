@@ -127,11 +127,18 @@ export class Sky {
     this.group.add(this.key, this.keyTarget);
     this.hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
     this.group.add(this.hemi);
-    scene.fog = new THREE.Fog(0x000000, 20, 170);
+    scene.fog = new THREE.Fog(0x000000, 24, 190);
     this.apply(0, new THREE.Vector3());
   }
 
   setShadows(on) { this.key.castShadow = on; }
+
+  /** Switch preset (dawn/day/dusk/night/cycle) at runtime, e.g. from the lobby. */
+  setMode(mode) {
+    if (mode === this.mode) return;
+    this.mode = mode;
+    if (mode === 'cycle') this.time = 0.3; else this.time = TIME_PRESETS[mode] ?? 0.715;
+  }
 
   apply(elapsed, playerPos) {
     if (this.mode === 'cycle') this.time = (0.3 + elapsed / CYCLE_SECONDS) % 1;

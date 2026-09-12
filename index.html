@@ -32,14 +32,15 @@
         <input id="name-input" maxlength="14" placeholder="Eyeball" autocomplete="off">
       </label>
       <div class="row">
-        <button id="btn-host" class="primary">Host a game</button>
-        <button id="btn-solo">Solo run</button>
+        <button id="btn-host" class="primary" disabled>Host a game</button>
+        <button id="btn-solo" disabled>Solo run</button>
       </div>
       <div class="row join-row">
         <input id="code-input" maxlength="6" placeholder="ROOM CODE" autocomplete="off" spellcheck="false">
-        <button id="btn-join">Join</button>
+        <button id="btn-join" disabled>Join</button>
       </div>
-      <p class="hint">WASD / arrows to move · mouse to look · Shift to sprint · M to mute</p>
+      <div class="progress" id="menu-progress"><div class="fill"></div><span class="label">Loading…</span></div>
+      <p class="hint">WASD / arrows to move · mouse to look · Shift to sprint · Esc for menu</p>
       <p class="hint" id="menu-status"></p>
     </div>
   </section>
@@ -60,7 +61,7 @@
           <p class="hint" id="lobby-solo-hint">Share the room code, or start alone for a solo run.</p>
         </div>
         <div class="settings" id="settings">
-          <h3>Maze settings <span id="settings-lock" class="tag">host only</span></h3>
+          <h3>Maze settings <span id="settings-lock" class="tag">host only</span><button id="btn-reset" class="tiny" title="Reset to defaults">↺ Reset</button></h3>
           <label>Width <output id="o-width">20</output><input type="range" id="s-width" min="6" max="45" value="20" data-setting="width"></label>
           <label>Height <output id="o-height">20</output><input type="range" id="s-height" min="6" max="45" value="20" data-setting="height"></label>
           <label>Hedge height <output id="o-hedge">35</output><input type="range" id="s-hedge" min="10" max="90" value="35" data-setting="hedge"></label>
@@ -79,6 +80,7 @@
           </label>
           <h3>Local</h3>
           <label>Shadows <input type="checkbox" id="l-shadows" checked></label>
+          <label>Minimap <input type="checkbox" id="l-minimap" checked></label>
           <label>Volume <input type="range" id="l-volume" min="0" max="100" value="70"></label>
         </div>
       </div>
@@ -91,7 +93,10 @@
 
   <!-- ===== LOADING ===== -->
   <section id="screen-loading" class="screen hidden">
-    <div class="panel small"><h2 id="loading-text">Growing hedges…</h2></div>
+    <div class="panel small">
+      <h2 id="loading-text">Growing hedges…</h2>
+      <div class="progress big" id="load-progress"><div class="fill"></div><span class="label"></span></div>
+    </div>
   </section>
 
   <!-- ===== HUD ===== -->
@@ -102,15 +107,34 @@
     </div>
     <div id="compass"><div id="compass-strip"></div><div class="needle"></div></div>
     <div id="crosshair"></div>
+    <canvas id="minimap" width="220" height="220"></canvas>
     <div id="countdown" class="hidden">3</div>
     <div id="banner" class="hidden"></div>
-    <div id="hud-hint">Click to look around · WASD move · Shift sprint · Esc release mouse</div>
+    <div id="hud-hint">Click to look around · WASD move · Shift sprint · Esc menu · Tab minimap</div>
     <div id="finish-card" class="hidden">
       <h2 id="finish-title">You escaped!</h2>
       <p id="finish-sub"></p>
       <ol id="finish-ranks"></ol>
       <button id="btn-back-lobby" class="primary hidden">Back to lobby</button>
       <p class="hint" id="finish-wait">Waiting for the host…</p>
+    </div>
+
+    <!-- ===== PAUSE / SETTINGS (Esc) ===== -->
+    <div id="pause" class="hidden">
+      <div class="panel">
+        <h2>Menu</h2>
+        <p class="hint" style="text-align:left;margin:4px 0 14px">The race keeps running for everyone else.</p>
+        <div class="settings">
+          <label>Volume <input type="range" id="p-volume" min="0" max="100" value="70"></label>
+          <label>Mute <input type="checkbox" id="p-mute"></label>
+          <label>Shadows <input type="checkbox" id="p-shadows" checked></label>
+          <label>Minimap <input type="checkbox" id="p-minimap" checked></label>
+        </div>
+        <div class="row" style="margin-top:16px">
+          <button id="btn-resume" class="primary">Resume</button>
+          <button id="btn-abandon" class="danger">Abandon race</button>
+        </div>
+      </div>
     </div>
   </div>
 

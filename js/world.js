@@ -1,13 +1,16 @@
-// Builds the 3D hedge maze: walls, ground, clutter, torches, signs, exit.
+// Builds the 3D hedge maze: walls, ground, clutter, torches, signs, exit, wheat fields.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import * as T from './textures.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { getSharedTextures, getSignTexture, yieldFrame } from './textures.js';
 import { mulberry32, N, E, S, W, DIRS, openings } from './maze.js';
 
 export const CELL = 7;      // cell pitch
 export const THICK = 1.8;   // hedge thickness
 const TILE = 4;             // world units per hedge texture repeat
 const LIGHT_POOL = 8;       // point lights shared between the nearest torches
+const ROUND = 0.55;         // hedge edge rounding radius
+const FIELD_RADIUS = 210;   // how far the wheat instances reach (fog hides the rest)
 
 const flameVert = /* glsl */`
   varying vec2 vUv; varying float vSeed;
@@ -62,9 +65,9 @@ const emberFrag = /* glsl */`
 
 function valueNoiseFactory(seed) {
   const r = mulberry32(seed);
-  const table = new Float32Array(512 * 512 / 64); // coarse hash table
+  const table = new Float32Array(4096);
   for (let i = 0; i < table.length; i++) table[i] = r();
-  const h = (x, y) => table[((x * 73856093) ^ (y * 19349663)) & (table.length - 1) >>> 0];
+  const h = (x, y) => table[((x * 73856093) ^ (y * 19349663)) & 4095];
   return (x, y) => {
     const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
     const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
@@ -90,8 +93,32 @@ export class World {
     this.disposables = [];
     this.time = 0;
     this._lightTimer = 0;
-    this.build();
-    scene.add(this.root);
+    this.ready = false;
+  }
+
+  /** Build in stages, yielding between them so the page can paint a progress bar. */
+  async build(onProgress) {
+    const rep = (f, l) => onProgress && onProgress(f, l);
+    rep(0, 'Painting textures…');
+    this.tex = await getSharedTextures((f, l) => rep(f * 0.35, l));
+    const steps = [
+      ['Growing hedges…', () => { this.collectFaces(); this.buildHedges(); }],
+      ['Raking the paths…', () => this.buildGround()],
+      ['Hanging vines…', () => this.buildVines()],
+      ['Scattering leaves…', () => this.buildClutter()],
+      ['Lighting torches…', () => this.buildTorches()],
+      ['Painting signs…', () => { this.buildSigns(); this.buildExit(); }],
+      ['Sowing wheat…', () => this.buildWheat()],
+    ];
+    for (let i = 0; i < steps.length; i++) {
+      rep(0.35 + (i / steps.length) * 0.65, steps[i][0]);
+      await yieldFrame();
+      steps[i][1]();
+    }
+    this.scene.add(this.root);
+    this.ready = true;
+    rep(1, 'Ready');
+    return this;
   }
 
   // ------------------------------------------------------------ helpers
@@ -119,39 +146,13 @@ export class World {
     const c = this.cellCenter(s.x, s.y);
     const a = (index / Math.max(1, count)) * Math.PI * 2;
     const r = count > 1 ? 1.3 : 0;
-    // face towards the open side of the start cell
     const w = this.wall(s.x, s.y);
     const open = DIRS.find(d => !(w & d.bit)) || DIRS[0];
     const yaw = Math.atan2(-open.dx, -open.dy); // camera looks down -Z at yaw 0
     return { x: c.x + Math.cos(a) * r, z: c.z + Math.sin(a) * r, yaw };
   }
 
-  // ------------------------------------------------------------ build
-  build() {
-    const { w, h } = this.maze;
-    this.tex = {
-      hedge: T.makeHedgeTextures(this.maze.seed),
-      ground: T.makeGroundTexture(this.maze.seed + 1),
-      bark: T.makeBarkTexture(this.maze.seed + 2),
-      wood: T.makeWoodTexture(this.maze.seed + 3),
-      stone: T.makeStoneTexture(this.maze.seed + 4),
-      vines: [T.makeVineTexture(this.maze.seed + 10), T.makeVineTexture(this.maze.seed + 11), T.makeVineTexture(this.maze.seed + 12)],
-      moss: T.makeBlobTexture(this.maze.seed + 20, { hue: 95, sat: 45, light: 30 }),
-      dirt: T.makeBlobTexture(this.maze.seed + 21, { hue: 28, sat: 35, light: 18, speckle: true }),
-      tuft: T.makeTuftTexture(this.maze.seed + 22),
-      leaf: T.makeLeafTexture(),
-    };
-    for (const k in this.tex) { const v = this.tex[k]; if (Array.isArray(v)) v.forEach(t => this.disposables.push(t)); else if (v.map) { this.disposables.push(v.map, v.bump); } else this.disposables.push(v); }
-
-    this.collectFaces();
-    this.buildHedges();
-    this.buildGround();
-    this.buildClutter();
-    this.buildTorches();
-    this.buildSigns();
-    this.buildExit();
-  }
-
+  // ------------------------------------------------------------ build steps
   collectFaces() {
     const { w, h } = this.maze;
     this.faces = [];
@@ -169,7 +170,6 @@ export class World {
     const { w, h, walls } = this.maze;
     const rand = this.rand;
     const runs = [];
-    // horizontal lines z = j*CELL
     for (let j = 0; j <= h; j++) {
       let x = 0;
       while (x < w) {
@@ -197,34 +197,43 @@ export class World {
     const geos = [];
     const col = new THREE.Color();
     const tmp = new THREE.Vector3();
-    for (const r of runs) {
-      const len = r.b - r.a + THICK - 0.02;
-      const H = this.hedgeH * (0.93 + rand() * 0.1);
-      const g = r.horizontal ? new THREE.BoxGeometry(len, H, THICK) : new THREE.BoxGeometry(THICK, H, len);
-      if (r.horizontal) g.translate((r.a + r.b) / 2, H / 2, r.line); else g.translate(r.line, H / 2, (r.a + r.b) / 2);
-      // world-space UVs (triplanar-ish) + random offset so every run starts at a different spot
+    const paint = (g, H, tint, ou, ov, dark) => {
       const pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv;
-      const ou = rand() * 10, ov = rand() * 10;
       const colors = new Float32Array(pos.count * 3);
-      const tint = [0.86 + rand() * 0.28, 0.86 + rand() * 0.28, 0.86 + rand() * 0.28];
-      // correlate a bit so it's a green shift, not rainbow
-      const m = (tint[0] + tint[1] + tint[2]) / 3; for (let k = 0; k < 3; k++) tint[k] = m * 0.6 + tint[k] * 0.4;
       for (let i = 0; i < pos.count; i++) {
         tmp.fromBufferAttribute(pos, i);
-        const nx = Math.abs(nor.getX(i)), ny = Math.abs(nor.getY(i));
-        if (nx > 0.5) uv.setXY(i, tmp.z / TILE + ou, tmp.y / TILE + ov);
-        else if (ny > 0.5) uv.setXY(i, tmp.x / TILE + ou, tmp.z / TILE + ov);
+        const nx = Math.abs(nor.getX(i)), ny = Math.abs(nor.getY(i)), nz = Math.abs(nor.getZ(i));
+        if (nx >= ny && nx >= nz) uv.setXY(i, tmp.z / TILE + ou, tmp.y / TILE + ov);
+        else if (ny >= nz) uv.setXY(i, tmp.x / TILE + ou, tmp.z / TILE + ov);
         else uv.setXY(i, tmp.x / TILE + ou, tmp.y / TILE + ov);
-        // darker + browner near the ground, lighter at the top
-        const f = Math.min(1, tmp.y / 7);
+        const f = Math.min(1, Math.max(0, tmp.y) / 7);
         const top = Math.min(1, Math.max(0, (tmp.y - H * 0.75) / (H * 0.25)));
-        col.setRGB(tint[0] * (0.62 + 0.38 * f) * (1 + 0.12 * top) * (f < 1 ? 1.05 : 1),
-          tint[1] * (0.55 + 0.45 * f) * (1 + 0.12 * top),
-          tint[2] * (0.45 + 0.55 * f) * (1 + 0.10 * top));
+        col.setRGB(tint[0] * (0.62 + 0.38 * f) * (1 + 0.12 * top) * dark,
+          tint[1] * (0.55 + 0.45 * f) * (1 + 0.12 * top) * dark,
+          tint[2] * (0.45 + 0.55 * f) * (1 + 0.10 * top) * dark);
         colors[i * 3] = col.r; colors[i * 3 + 1] = col.g; colors[i * 3 + 2] = col.b;
       }
       g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    };
+    for (const r of runs) {
+      const len = r.b - r.a + THICK - 0.02;
+      const H = this.hedgeH * (0.93 + rand() * 0.1);
+      const ou = rand() * 10, ov = rand() * 10;
+      const tint = [0.86 + rand() * 0.28, 0.86 + rand() * 0.28, 0.86 + rand() * 0.28];
+      const m = (tint[0] + tint[1] + tint[2]) / 3; for (let k = 0; k < 3; k++) tint[k] = m * 0.6 + tint[k] * 0.4;
+      // main body: rounded box, sunk by the rounding radius so the base meets the ground flush
+      const bodyH = H + ROUND;
+      const g = r.horizontal ? new RoundedBoxGeometry(len, bodyH, THICK, 3, ROUND) : new RoundedBoxGeometry(THICK, bodyH, len, 3, ROUND);
+      const cx = r.horizontal ? (r.a + r.b) / 2 : r.line, cz = r.horizontal ? r.line : (r.a + r.b) / 2;
+      g.translate(cx, bodyH / 2 - ROUND, cz);
+      paint(g, H, tint, ou, ov, 1);
       geos.push(g);
+      // flared, softer base mound so the hedge looks rooted rather than placed
+      const mh = 1.0, extra = 0.6;
+      const mg = r.horizontal ? new RoundedBoxGeometry(len + extra, mh, THICK + extra, 2, 0.45) : new RoundedBoxGeometry(THICK + extra, mh, len + extra, 2, 0.45);
+      mg.translate(cx, mh / 2 - 0.5, cz);
+      paint(mg, H, tint, ou + 3, ov + 3, 0.72);
+      geos.push(mg);
     }
     const merged = mergeGeometries(geos, false);
     geos.forEach(g => g.dispose());
@@ -241,10 +250,9 @@ export class World {
 
   buildGround() {
     const { w, h } = this.maze;
-    const margin = 90;
+    const margin = 700;
     const W = w * CELL + margin * 2, H = h * CELL + margin * 2;
-    const segX = Math.min(200, Math.ceil(W / 3)), segY = Math.min(200, Math.ceil(H / 3));
-    const g = new THREE.PlaneGeometry(W, H, segX, segY);
+    const g = new THREE.PlaneGeometry(W, H, 160, 160);
     g.rotateX(-Math.PI / 2);
     g.translate(w * CELL / 2, 0, h * CELL / 2);
     const noise = valueNoiseFactory(this.maze.seed + 77);
@@ -253,11 +261,12 @@ export class World {
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i);
       const n1 = noise(x * 0.06, z * 0.06), n2 = noise(x * 0.2 + 50, z * 0.2 + 50);
-      const inside = x > -2 && z > -2 && x < w * CELL + 2 && z < h * CELL + 2;
-      // outside the maze becomes a greener meadow
-      const grass = inside ? 0 : Math.min(1, (Math.max(-x, -z, x - w * CELL, z - h * CELL)) / 12);
+      const dOut = Math.max(-x, -z, x - w * CELL, z - h * CELL);
+      const field = Math.min(1, Math.max(0, (dOut - 1) / 6));
       let r = 0.75 + n1 * 0.5, gg = 0.72 + n1 * 0.45 + n2 * 0.15, b = 0.7 + n1 * 0.4;
-      r = r * (1 - grass) + 0.55 * grass; gg = gg * (1 - grass) + 1.05 * grass; b = b * (1 - grass) + 0.45 * grass;
+      // outside: golden wheat-field floor
+      const fr = 1.15 + n1 * 0.25, fg = 0.95 + n1 * 0.2, fb = 0.45 + n2 * 0.15;
+      r = r * (1 - field) + fr * field; gg = gg * (1 - field) + fg * field; b = b * (1 - field) + fb * field;
       colors[i * 3] = r; colors[i * 3 + 1] = gg; colors[i * 3 + 2] = b;
     }
     g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -295,6 +304,31 @@ export class World {
     return mesh;
   }
 
+  buildVines() {
+    const rand = this.rand;
+    const faces = this.faces;
+    const pick = () => faces[(rand() * faces.length) | 0];
+    const plane = new THREE.PlaneGeometry(1, 1);
+    const yawOf = (f) => Math.atan2(f.nx, f.nz);
+    const maxBase = Math.max(2, Math.min(this.hedgeH - 8, 22));
+    for (let v = 0; v < this.tex.vines.length; v++) {
+      const mat = new THREE.MeshStandardMaterial({ map: this.tex.vines[v], transparent: true, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.9 });
+      const count = Math.round(faces.length * 0.42);
+      this.instanced(plane.clone(), mat, count, (i, p, e, s, c) => {
+        const f = pick();
+        const along = (rand() - 0.5) * (f.len - 2.2);
+        const hgt = 4 + rand() * 9;
+        const base = rand() < 0.55 ? 0 : rand() * maxBase;
+        p.set(f.x + f.tx * along + f.nx * (0.05 + rand() * 0.04), base + hgt / 2, f.z + f.tz * along + f.nz * (0.05 + rand() * 0.04));
+        e.set(0, yawOf(f), 0);
+        s.set((rand() < 0.5 ? -1 : 1) * hgt * (0.22 + rand() * 0.1), hgt, 1);
+        c.setHSL(0.25 + rand() * 0.08, 0.5, 0.75 + rand() * 0.35);
+        return { color: true };
+      });
+    }
+    plane.dispose();
+  }
+
   buildClutter() {
     const rand = this.rand;
     const { w, h } = this.maze;
@@ -303,24 +337,10 @@ export class World {
     const plane = new THREE.PlaneGeometry(1, 1);
     const yawOf = (f) => Math.atan2(f.nx, f.nz);
 
-    // --- vines climbing the hedges
-    for (let v = 0; v < 3; v++) {
-      const mat = new THREE.MeshStandardMaterial({ map: this.tex.vines[v], transparent: true, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.9 });
-      const count = Math.round(faces.length * 0.14);
-      this.instanced(plane.clone(), mat, count, (i, p, e, s) => {
-        const f = pick();
-        const along = (rand() - 0.5) * (f.len - 3);
-        const hgt = 5 + rand() * 7;
-        const base = rand() < 0.6 ? 0 : rand() * Math.min(this.hedgeH - hgt - 1, 14);
-        p.set(f.x + f.tx * along + f.nx * 0.07, base + hgt / 2, f.z + f.tz * along + f.nz * 0.07);
-        e.set(0, yawOf(f), 0);
-        s.set((rand() < 0.5 ? -1 : 1) * hgt * 0.26, hgt, 1);
-      });
-    }
     // --- moss patches low on walls
     {
       const mat = new THREE.MeshStandardMaterial({ map: this.tex.moss, transparent: true, depthWrite: false, side: THREE.DoubleSide, roughness: 1, polygonOffset: true, polygonOffsetFactor: -1 });
-      this.instanced(plane.clone(), mat, Math.round(faces.length * 0.5), (i, p, e, s) => {
+      this.instanced(plane.clone(), mat, Math.round(faces.length * 0.7), (i, p, e, s) => {
         const f = pick();
         const along = (rand() - 0.5) * (f.len - 2), sz = 1.2 + rand() * 2.4;
         p.set(f.x + f.tx * along + f.nx * 0.05, 0.2 + rand() * 1.8 + sz * 0.3, f.z + f.tz * along + f.nz * 0.05);
@@ -346,7 +366,7 @@ export class World {
       const mat = new THREE.MeshStandardMaterial({ map: this.tex.tuft, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 1 });
       this.instanced(cross, mat, Math.round(faces.length * 0.7), (i, p, e, s, c) => {
         const f = pick();
-        const along = (rand() - 0.5) * (f.len - 1), out = 0.35 + rand() * 1.2;
+        const along = (rand() - 0.5) * (f.len - 1), out = 0.5 + rand() * 1.2;
         const sz = 0.7 + rand() * 0.9;
         p.set(f.x + f.tx * along + f.nx * out, 0, f.z + f.tz * along + f.nz * out);
         e.set(0, rand() * 6.28, 0); s.set(sz, sz, sz);
@@ -360,7 +380,7 @@ export class World {
       const palette = [[0.08, 0.8, 0.4], [0.05, 0.8, 0.35], [0.12, 0.7, 0.45], [0.02, 0.6, 0.3], [0.25, 0.4, 0.3]];
       this.instanced(plane.clone(), mat, Math.round(w * h * 14), (i, p, e, s, c) => {
         const near = rand() < 0.7;
-        if (near) { const f = pick(); const along = (rand() - 0.5) * f.len, out = 0.1 + rand() * 2.2; p.set(f.x + f.tx * along + f.nx * out, 0.02 + rand() * 0.03, f.z + f.tz * along + f.nz * out); }
+        if (near) { const f = pick(); const along = (rand() - 0.5) * f.len, out = 0.3 + rand() * 2.2; p.set(f.x + f.tx * along + f.nx * out, 0.02 + rand() * 0.03, f.z + f.tz * along + f.nz * out); }
         else p.set(rand() * w * CELL, 0.02, rand() * h * CELL);
         e.set(-Math.PI / 2 + (rand() - .5) * 0.3, 0, rand() * 6.28);
         const sz = 0.22 + rand() * 0.22; s.set(sz, sz, 1);
@@ -374,7 +394,7 @@ export class World {
       const mat = new THREE.MeshStandardMaterial({ map: this.tex.stone, roughness: 0.95 });
       this.instanced(geo, mat, Math.round(faces.length * 0.22), (i, p, e, s, c) => {
         const f = pick();
-        const along = (rand() - 0.5) * (f.len - 1), out = 0.5 + rand() * 1.4;
+        const along = (rand() - 0.5) * (f.len - 1), out = 0.6 + rand() * 1.4;
         const sz = 0.15 + rand() * 0.4;
         p.set(f.x + f.tx * along + f.nx * out, sz * 0.5, f.z + f.tz * along + f.nz * out);
         e.set(rand() * 6.28, rand() * 6.28, rand() * 6.28); s.set(sz * (0.7 + rand() * 0.8), sz * 0.7, sz * (0.7 + rand() * 0.8));
@@ -387,7 +407,7 @@ export class World {
       const count = Math.round(w * h * 0.7);
       const positions = [];
       for (let i = 0; i < count; i++) {
-        const f = pick(); const along = (rand() - 0.5) * (f.len - 1), out = 0.4 + rand() * 0.8;
+        const f = pick(); const along = (rand() - 0.5) * (f.len - 1), out = 0.6 + rand() * 0.8;
         positions.push({ x: f.x + f.tx * along + f.nx * out, z: f.z + f.tz * along + f.nz * out, sz: 0.07 + rand() * 0.14, hue: rand() < 0.5 ? 0.0 : 0.08, l: 0.3 + rand() * 0.3 });
       }
       const stem = new THREE.CylinderGeometry(0.35, 0.45, 1, 7); stem.translate(0, 0.5, 0);
@@ -407,19 +427,16 @@ export class World {
     const count = Math.round(w * h * 0.28 * pct);
     if (!count) return;
     const faces = this.faces.slice();
-    // shuffle & take
     for (let i = faces.length - 1; i > 0; i--) { const j = (rand() * (i + 1)) | 0; [faces[i], faces[j]] = [faces[j], faces[i]]; }
     const chosen = faces.slice(0, Math.min(count, faces.length));
     const Y = 3.4;
     this.torches = chosen.map(f => ({ x: f.x + f.nx * 0.55, y: Y, z: f.z + f.nz * 0.55, nx: f.nx, nz: f.nz, phase: rand() * 100 }));
 
-    // holder: angled wooden stick + iron ring + stone bowl (instanced)
     const stick = new THREE.CylinderGeometry(0.07, 0.1, 1.5, 6);
     const stickMat = new THREE.MeshStandardMaterial({ map: this.tex.bark, roughness: 0.9 });
-    this.instanced(stick, stickMat, this.torches.length, (i, p, e, s) => {
+    this.instanced(stick, stickMat, this.torches.length, (i, p, e) => {
       const t = this.torches[i];
       p.set(t.x - t.nx * 0.25, t.y - 0.55, t.z - t.nz * 0.25);
-      // tilt outwards from the wall
       e.set(0.35 * t.nz, 0, -0.35 * t.nx);
     }, { shadows: true });
     const bowl = new THREE.CylinderGeometry(0.28, 0.14, 0.32, 8, 1, true);
@@ -429,7 +446,6 @@ export class World {
     const bracketMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.6, metalness: 0.6 });
     this.instanced(bracket, bracketMat, this.torches.length, (i, p, e) => { const t = this.torches[i]; p.set(t.x - t.nx * 0.42, t.y - 1.05, t.z - t.nz * 0.42); e.set(0, Math.atan2(t.nx, t.nz) + Math.PI / 2, 0); });
 
-    // flames
     this.flameMat = new THREE.ShaderMaterial({ uniforms: { uTime: { value: 0 } }, vertexShader: flameVert, fragmentShader: flameFrag, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
     const flameGeo = new THREE.PlaneGeometry(1.1, 1.9); flameGeo.translate(0, 0.95, 0);
     this.disposables.push(this.flameMat, flameGeo);
@@ -439,7 +455,6 @@ export class World {
       m.frustumCulled = false;
       this.root.add(m); this.flames.push(m);
     }
-    // embers (one Points for all torches)
     const per = 10, n = this.torches.length * per;
     const pos = new Float32Array(n * 3), seed = new Float32Array(n * 3);
     for (let i = 0; i < this.torches.length; i++) for (let k = 0; k < per; k++) {
@@ -452,39 +467,48 @@ export class World {
     const embers = new THREE.Points(eg, this.emberMat); embers.frustumCulled = false;
     this.root.add(embers); this.disposables.push(eg, this.emberMat);
 
-    // shared point light pool
     for (let i = 0; i < Math.min(LIGHT_POOL, this.torches.length); i++) {
       const l = new THREE.PointLight(0xff9a3c, 0, 22, 1.6);
       this.root.add(l); this.lights.push(l);
     }
   }
 
+  /**
+   * Signpost: two posts with the board hung between them (nothing crosses the face),
+   * optional direction plank on a short stub above the board.
+   */
   makeSignGroup(text, { arrow = null, glow = false } = {}) {
     const g = new THREE.Group();
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 2.8, 7), new THREE.MeshStandardMaterial({ map: this.tex.bark, roughness: 0.9 }));
-    post.position.y = 1.4; post.castShadow = true; g.add(post);
-    const texT = T.makeSignTexture(text, { glow });
-    this.disposables.push(texT);
+    const barkMat = new THREE.MeshStandardMaterial({ map: this.tex.bark, roughness: 0.9 });
+    const woodMat = new THREE.MeshStandardMaterial({ map: this.tex.wood, roughness: 0.85 });
+    const boardW = 1.7, boardH = 0.85, boardY = 1.72;
+    const postH = boardY + boardH / 2 + 0.12;
+    for (const sx of [-1, 1]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, postH, 7), barkMat);
+      post.position.set(sx * (boardW / 2 + 0.06), postH / 2, 0); post.castShadow = true; g.add(post);
+    }
+    const texT = getSignTexture(text, { glow });
     const boardMat = new THREE.MeshStandardMaterial({ map: texT, roughness: 0.8, emissive: glow ? 0x4cff80 : 0x000000, emissiveMap: glow ? texT : null, emissiveIntensity: glow ? 1.2 : 0 });
-    const board = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.85), boardMat);
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(boardW, boardH), boardMat);
     const boardBack = board.clone(); boardBack.rotation.y = Math.PI;
-    board.position.set(0, 1.75, 0.06); boardBack.position.set(0, 1.75, -0.06);
-    const backing = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.9, 0.1), new THREE.MeshStandardMaterial({ map: this.tex.wood }));
-    backing.position.y = 1.75; backing.castShadow = true;
+    board.position.set(0, boardY, 0.051); boardBack.position.set(0, boardY, -0.051);
+    const backing = new THREE.Mesh(new THREE.BoxGeometry(boardW + 0.12, boardH + 0.08, 0.1), woodMat);
+    backing.position.y = boardY; backing.castShadow = true;
     g.add(board, boardBack, backing);
     if (arrow) {
-      // pointing plank: rectangle + tip, lying in the plane that contains the arrow direction
+      const stubH = 0.5;
+      const stub = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, stubH, 6), barkMat);
+      stub.position.y = boardY + boardH / 2 + stubH / 2 - 0.05; g.add(stub);
       const shape = new THREE.Shape();
       shape.moveTo(-0.9, -0.2); shape.lineTo(0.8, -0.2); shape.lineTo(1.3, 0); shape.lineTo(0.8, 0.2); shape.lineTo(-0.9, 0.2); shape.closePath();
       const pg = new THREE.ExtrudeGeometry(shape, { depth: 0.08, bevelEnabled: false });
       pg.translate(0.2, 0, -0.04);
-      const plank = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({ map: this.tex.wood, roughness: 0.85 }));
+      const plank = new THREE.Mesh(pg, woodMat);
       plank.castShadow = true;
-      // rotate about Y so local +X points along (dx,dz)
-      plank.rotation.y = Math.atan2(-arrow.dy, arrow.dx);
-      plank.position.y = 2.45;
+      plank.rotation.y = Math.atan2(-arrow.dy, arrow.dx); // local +X -> world (dx,dy)
+      plank.position.y = boardY + boardH / 2 + stubH - 0.05;
+      plank.userData.worldYaw = plank.rotation.y;
       g.add(plank);
-      this.disposables.push(pg);
     }
     return g;
   }
@@ -493,7 +517,6 @@ export class World {
     const rand = this.rand;
     const { w, h, toExit, start, end } = this.maze;
     const idx = (x, y) => y * w + x;
-    // --- hint signs at junctions
     const cand = this.junctions.filter(j => !(j.x === start.x && j.y === start.y) && !(j.x === end.x && j.y === end.y));
     for (let i = cand.length - 1; i > 0; i--) { const j = (rand() * (i + 1)) | 0; [cand[i], cand[j]] = [cand[j], cand[i]]; }
     const nSigns = Math.min(this.settings.signs, cand.length);
@@ -508,7 +531,6 @@ export class World {
       if (rand() * 100 > this.settings.honest) { const others = open.filter(d => d !== best); if (others.length) dir = others[(rand() * others.length) | 0]; }
       this.placeSign(c, this.makeSignGroup('EXIT', { arrow: dir }));
     }
-    // --- flavour signs
     const phrases = ['LOST?', 'TURN BACK', 'NOT THIS WAY', 'GOOD LUCK', 'KEEP GOING', 'ALMOST THERE?', 'NO REFUNDS', 'MIND THE HEDGE', 'BLINK TWICE', 'WHY?'];
     const nFlavour = Math.min(8, Math.round(w * h * 0.02));
     for (let i = 0; i < nFlavour; i++) {
@@ -519,11 +541,10 @@ export class World {
       const text = isDead && rand() < 0.7 ? 'DEAD END' : phrases[(rand() * phrases.length) | 0];
       this.placeSign(c, this.makeSignGroup(text));
     }
-    // --- START sign
     this.placeSign(start, this.makeSignGroup('START'), true);
   }
 
-  /** Put a sign inside a cell, tucked against a wall if there is one. */
+  /** Put a sign inside a cell, tucked against a wall if there is one, board facing into the cell. */
   placeSign(cell, group, corner = false) {
     const rand = this.rand;
     const wl = this.wall(cell.x, cell.y);
@@ -533,13 +554,12 @@ export class World {
     if (walled.length) {
       const d = walled[(rand() * walled.length) | 0];
       const f = this.face(cell.x, cell.y, d);
-      x = f.x + f.nx * 0.9 + f.tx * (rand() - .5) * 2.5; z = f.z + f.nz * 0.9 + f.tz * (rand() - .5) * 2.5;
-      yaw = Math.atan2(f.nx, f.nz) + (rand() - .5) * 0.8; // board faces away from the wall
+      x = f.x + f.nx * 1.0 + f.tx * (rand() - .5) * 2.0; z = f.z + f.nz * 1.0 + f.tz * (rand() - .5) * 2.0;
+      yaw = Math.atan2(f.nx, f.nz) + (rand() - .5) * 0.5;
     } else if (corner) { x += 2; z += 2; }
     group.position.set(x, 0, z);
     group.rotation.y = yaw;
-    // the arrow plank must keep its world direction: undo the group yaw on it
-    for (const ch of group.children) if (ch.geometry && ch.geometry.type === 'ExtrudeGeometry') ch.rotation.y -= yaw;
+    for (const ch of group.children) if (ch.userData.worldYaw !== undefined) ch.rotation.y = ch.userData.worldYaw - yaw;
     this.root.add(group);
     this.disposables.push(...group.children.map(m => m.geometry), ...group.children.map(m => m.material));
   }
@@ -559,24 +579,77 @@ export class World {
     }
     const beam = new THREE.Mesh(new THREE.BoxGeometry(gap + 0.2, 0.8, 1.0), stone);
     beam.position.y = ph + 0.3; beam.castShadow = true; g.add(beam);
-    const texT = T.makeSignTexture('EXIT', { glow: true });
+    const texT = getSignTexture('EXIT', { glow: true });
     const signMat = new THREE.MeshStandardMaterial({ map: texT, emissive: 0x66ff99, emissiveMap: texT, emissiveIntensity: 1.6, roughness: 0.6 });
     for (const side of [1, -1]) {
       const s = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.3), signMat);
       s.position.set(0, ph + 0.3, side * 0.52); s.rotation.y = side > 0 ? 0 : Math.PI; g.add(s);
     }
     const light = new THREE.PointLight(0x66ff99, 30, 30, 1.5); light.position.set(0, 4, 0); g.add(light);
-    // lanterns on the pillars
     const lampMat = new THREE.MeshStandardMaterial({ color: 0xfff3c0, emissive: 0xffd070, emissiveIntensity: 2 });
     for (const sx of [-1, 1]) { const l = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), lampMat); l.position.set(sx * (gap / 2 - pw / 2 + 0.05), ph + 0.9, 0); g.add(l); }
     this.root.add(g);
     this.exitGroup = g;
     this.exitPos = new THREE.Vector3(gx, 0, gz);
-    this.disposables.push(stone, signMat, lampMat, texT);
-    // finish banner outside
+    this.disposables.push(stone, signMat, lampMat);
     const banner = this.makeSignGroup('FINISH', { glow: true });
-    banner.position.set(gx + exitDir.dx * 7, 0, gz + exitDir.dy * 7); banner.rotation.y = yaw + Math.PI;
+    banner.position.set(gx + exitDir.dx * 9, 0, gz + exitDir.dy * 9); banner.rotation.y = yaw + Math.PI;
     this.root.add(banner);
+  }
+
+  /**
+   * Endless-looking wheat fields: one InstancedMesh of crossed quads around the maze,
+   * denser near the hedges, thinning out into the fog. Sway is done in the vertex shader,
+   * so the CPU never touches the instances after placement.
+   */
+  buildWheat() {
+    const rand = this.rand;
+    const { w, h, end, exitDir } = this.maze;
+    const W = w * CELL, H = h * CELL;
+    const R = FIELD_RADIUS;
+    const count = 16000;
+    const a = new THREE.PlaneGeometry(1, 1); const b = a.clone().rotateY(Math.PI / 2);
+    const cross = mergeGeometries([a, b]); cross.translate(0, 0.5, 0);
+    a.dispose(); b.dispose();
+    const mat = new THREE.MeshStandardMaterial({ map: this.tex.wheat, transparent: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 1 });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.wheatTime = { value: 0 };
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nuniform float uTime;')
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          #ifdef USE_INSTANCING
+          float ph = instanceMatrix[3][0] * 0.35 + instanceMatrix[3][2] * 0.5;
+          float sw = sin(uTime * 1.4 + ph) * 0.16 + sin(uTime * 2.9 + ph * 1.7) * 0.05;
+          float k = uv.y * uv.y;
+          transformed.x += sw * k; transformed.z += sw * 0.5 * k;
+          #endif`);
+    };
+    // the mown path from the exit gate to the FINISH sign stays clear
+    const ex = end.x * CELL + CELL / 2 + exitDir.dx * CELL / 2, ez = end.y * CELL + CELL / 2 + exitDir.dy * CELL / 2;
+    const inMownPath = (x, z) => {
+      const dx = x - ex, dz = z - ez;
+      const along = dx * exitDir.dx + dz * exitDir.dy, side = Math.abs(dx * exitDir.dy - dz * exitDir.dx);
+      return along > -1 && along < 16 && side < 3.2;
+    };
+    const pts = [];
+    let guard = 0;
+    while (pts.length < count && guard++ < count * 6) {
+      const x = -R + rand() * (W + 2 * R), z = -R + rand() * (H + 2 * R);
+      const dOut = Math.max(-x, -z, x - W, z - H);
+      if (dOut < 1.6) continue;                       // inside / hugging the maze
+      if (inMownPath(x, z)) continue;
+      const keep = 1 - Math.min(1, dOut / R) * 0.85;  // thin out with distance
+      if (rand() > keep) continue;
+      pts.push([x, z, dOut]);
+    }
+    this.instanced(cross, mat, pts.length, (i, p, e, s, c) => {
+      const [x, z, d] = pts[i];
+      const hgt = 1.0 + rand() * 0.7 + Math.min(1, d / 60) * 0.5; // taller further out to fill the horizon
+      p.set(x, 0, z); e.set(0, rand() * Math.PI, 0);
+      s.set(hgt * 0.9, hgt, hgt * 0.9);
+      c.setHSL(0.11 + rand() * 0.03, 0.6 + rand() * 0.2, 0.55 + rand() * 0.2);
+      return { color: true };
+    });
   }
 
   // ------------------------------------------------------------ runtime
@@ -584,9 +657,8 @@ export class World {
     this.time += dt;
     if (this.flameMat) this.flameMat.uniforms.uTime.value = this.time;
     if (this.emberMat) this.emberMat.uniforms.uTime.value = this.time;
-    // billboard flames (cheap: only ones within ~60 units matter, but all is fine)
+    if (this.wheatTime) this.wheatTime.value = this.time;
     if (this._camQuat) for (const f of this.flames) f.quaternion.copy(this._camQuat);
-    // point-light pool: re-assign to nearest torches every 0.25s
     this._lightTimer -= dt;
     if (this._lightTimer <= 0 && this.lights.length) {
       this._lightTimer = 0.25;
@@ -610,7 +682,6 @@ export class World {
 
   /** Resolve a circle (x,z,r) against nearby hedge boxes. Mutates pos. */
   collide(pos, r) {
-    const { w, h } = this.maze;
     const T2 = THICK / 2;
     for (let iter = 0; iter < 3; iter++) {
       const cx = Math.floor(pos.x / CELL), cy = Math.floor(pos.z / CELL);
@@ -629,11 +700,10 @@ export class World {
 
   pushOut(p, r, minX, minZ, maxX, maxZ) {
     const qx = Math.max(minX, Math.min(p.x, maxX)), qz = Math.max(minZ, Math.min(p.z, maxZ));
-    let dx = p.x - qx, dz = p.z - qz;
+    const dx = p.x - qx, dz = p.z - qz;
     const d2 = dx * dx + dz * dz;
     if (d2 >= r * r) return;
     if (d2 < 1e-8) {
-      // inside the box: eject along the smallest penetration axis
       const l = p.x - minX, rr = maxX - p.x, t = p.z - minZ, b = maxZ - p.z;
       const m = Math.min(l, rr, t, b);
       if (m === l) p.x = minX - r; else if (m === rr) p.x = maxX + r; else if (m === t) p.z = minZ - r; else p.z = maxZ + r;
@@ -643,11 +713,12 @@ export class World {
     p.x += dx * push; p.z += dz * push;
   }
 
+  /** Geometries and materials are per-world; textures are shared and kept. */
   dispose() {
     this.scene.remove(this.root);
     this.root.traverse(o => {
       if (o.geometry) o.geometry.dispose();
-      if (o.material) { const ms = Array.isArray(o.material) ? o.material : [o.material]; ms.forEach(m => { for (const k in m) if (m[k] && m[k].isTexture) m[k].dispose(); m.dispose(); }); }
+      if (o.material) { const ms = Array.isArray(o.material) ? o.material : [o.material]; ms.forEach(m => m.dispose()); }
     });
     for (const d of this.disposables) if (d && d.dispose) d.dispose();
   }

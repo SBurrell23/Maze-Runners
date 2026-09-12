@@ -31,7 +31,7 @@ function wrapped(ctx, size, x, y, margin, fn) {
 function hsl(h, s, l, a = 1) { return `hsla(${h},${s}%,${l}%,${a})`; }
 
 // ---------------------------------------------------------------- HEDGE
-export function makeHedgeTextures(seed = 7, size = 1024) {
+export async function makeHedgeTextures(seed = 7, size = 1024, onChunk = null) {
   const rand = mulberry32(seed);
   const c = canvas(size), ctx = c.getContext('2d');
   const b = canvas(size), bctx = b.getContext('2d');
@@ -65,6 +65,7 @@ export function makeHedgeTextures(seed = 7, size = 1024) {
   // Leaves — thousands, drawn back to front (darker first).
   const leafCount = 19000;
   for (let i = 0; i < leafCount; i++) {
+    if (i % 2500 === 0 && i) { if (onChunk) onChunk(i / leafCount); await yieldFrame(); }
     const t = i / leafCount;
     const x = rand() * size, y = rand() * size;
     const rx = 3.5 + rand() * 7.5, ry = rx * (0.45 + rand() * 0.35);
@@ -430,4 +431,66 @@ export function makeStoneTexture(seed = 9) {
     ctx.stroke();
   }
   return tex(c);
+}
+
+export const yieldFrame = () => new Promise(r => setTimeout(r, 0));
+
+// ---------------------------------------------------------------- WHEAT (alpha, tinted per instance)
+export function makeWheatTexture(seed = 51) {
+  const rand = mulberry32(seed);
+  const w = 128, h = 256, c = canvas(w, h), ctx = c.getContext('2d');
+  ctx.lineCap = 'round';
+  for (let k = 0; k < 3; k++) {
+    const x0 = 40 + k * 24 + (rand() - .5) * 10;
+    const lean = (rand() - .5) * 26;
+    // stalk
+    ctx.strokeStyle = hsl(46 + rand() * 10, 55, 40 + rand() * 12); ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x0, h); ctx.quadraticCurveTo(x0 + lean * 0.3, h * 0.55, x0 + lean, 70); ctx.stroke();
+    // leaf blade
+    ctx.lineWidth = 2; ctx.strokeStyle = hsl(50, 45, 50, 0.9);
+    ctx.beginPath(); ctx.moveTo(x0, h * 0.8); ctx.quadraticCurveTo(x0 + 18, h * 0.62, x0 + 30 + rand() * 10, h * 0.66); ctx.stroke();
+    // head of grain: stacked kernels with awns
+    const hx = x0 + lean, hy = 70;
+    for (let i = 0; i < 9; i++) {
+      const y = hy + i * 5.5, side = i % 2 ? 1 : -1;
+      ctx.strokeStyle = hsl(46, 60, 62, 0.8); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx + side * 3, y); ctx.lineTo(hx + side * 12, y - 34 - rand() * 12); ctx.stroke();
+      ctx.fillStyle = hsl(44 + rand() * 8, 62, 52 + rand() * 14);
+      ctx.beginPath(); ctx.ellipse(hx + side * 3.5, y, 3.2, 5, side * 0.5, 0, 6.28); ctx.fill();
+      ctx.strokeStyle = 'rgba(90,60,10,0.5)'; ctx.stroke();
+    }
+  }
+  return tex(c, { repeat: false });
+}
+
+// ---------------------------------------------------------------- SHARED TEXTURE SET
+// Textures don't depend on the maze, so they are painted once and reused by every world.
+let sharedPromise = null;
+export function getSharedTextures(onProgress) {
+  if (!sharedPromise) sharedPromise = buildShared(onProgress);
+  return sharedPromise;
+}
+async function buildShared(onProgress) {
+  const rep = (f, l) => onProgress && onProgress(f, l);
+  rep(0.02, 'Painting hedge leaves…');
+  const hedge = await makeHedgeTextures(7, 1024, (f) => rep(0.02 + f * 0.5, 'Painting hedge leaves…'));
+  rep(0.55, 'Raking the dirt…'); await yieldFrame();
+  const ground = makeGroundTexture(11);
+  rep(0.7, 'Carving wood…'); await yieldFrame();
+  const bark = makeBarkTexture(3), wood = makeWoodTexture(5), stone = makeStoneTexture(9);
+  rep(0.8, 'Growing vines…'); await yieldFrame();
+  const vines = [makeVineTexture(21), makeVineTexture(22), makeVineTexture(23), makeVineTexture(24)];
+  const moss = makeBlobTexture(31, { hue: 95, sat: 45, light: 30 });
+  const dirt = makeBlobTexture(32, { hue: 28, sat: 35, light: 18, speckle: true });
+  rep(0.9, 'Sowing wheat…'); await yieldFrame();
+  const tuft = makeTuftTexture(33), leaf = makeLeafTexture(), wheat = makeWheatTexture(51);
+  rep(1, 'Ready');
+  return { hedge, ground, bark, wood, stone, vines, moss, dirt, tuft, leaf, wheat };
+}
+
+const signCache = new Map();
+export function getSignTexture(text, opts = {}) {
+  const key = text + '|' + (opts.glow ? 'g' : '');
+  if (!signCache.has(key)) signCache.set(key, makeSignTexture(text, opts));
+  return signCache.get(key);
 }
