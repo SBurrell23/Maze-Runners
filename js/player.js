@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { EYE_HEIGHT } from './eyeball.js';
 
 const RADIUS = 0.7;
-const WALK = 7.5, SPRINT = 12;
+const WALK = 7.5, SPRINT = 9.75; // sprint adds half of what it used to
 const INTERP_DELAY = 0.12; // seconds behind "now" that remote players are rendered
 
 export class LocalPlayer {

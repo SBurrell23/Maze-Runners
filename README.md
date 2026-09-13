@@ -14,7 +14,8 @@ floating eyeball, the hedges are absurdly tall, and the first one out of the exi
 - **Everything is generated.** Hedge, ground, bark, vine, moss, sign, eyeball and cloud textures are painted
   onto canvases at load time. All sound and music is synthesised with the Web Audio API. There are no assets.
 - **Solo mode.** "Solo run" skips the network entirely so you can test-drive mazes and settings alone.
-- **Fog-of-war minimap.** Only corridors you have walked or seen are drawn. Other eyeballs show up only inside explored cells.
+- **Fog-of-war minimap** (a host setting). Only corridors you have walked or seen are drawn. Other eyeballs show up only inside explored cells.
+- **Central start.** Everyone spawns in a 3x3 plaza in the dead centre; a growing-tree generator with a low "newest cell" bias gives the maze plenty of forks, and the exit is the boundary cell farthest away by path length.
 - **Wheat fields forever.** One instanced, wind-swayed mesh of 16k wheat quads plus a golden ground and fog make the world outside the hedges look endless at almost no GPU cost.
 
 ## Lobby settings
@@ -27,12 +28,13 @@ floating eyeball, the hedges are absurdly tall, and the first one out of the exi
 | Hint signs     | Number of "EXIT →" signposts placed at junctions                 |
 | Honest signs   | Chance a hint sign points the right way                          |
 | Torches        | Wall-torch density                                               |
-| Time of day    | Dawn, day, dusk, night, or a cycling sky                         |
+| Time of day    | Dawn, day, dusk, night, or a cycling sky (previewed live)        |
+| Explorer minimap | Fog-of-war minimap on or off for every player                  |
 
 ## Controls
 
 `WASD` / arrows move · mouse looks (click to capture) · `Shift` sprints · `Q`/`E` or arrows turn without
-mouse capture · `M` mutes · `Tab` toggles the minimap · `Esc` opens the in-race menu (sound, shadows, minimap, abandon).
+mouse capture · `M` mutes · `Esc` opens the in-race menu (sound, shadows, abandon or, for the host, end the race).
 
 ## Running locally
 

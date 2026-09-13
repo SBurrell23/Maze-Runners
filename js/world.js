@@ -145,7 +145,7 @@ export class World {
     const s = this.maze.start;
     const c = this.cellCenter(s.x, s.y);
     const a = (index / Math.max(1, count)) * Math.PI * 2;
-    const r = count > 1 ? 1.3 : 0;
+    const r = count > 1 ? 2.4 : 0;
     const w = this.wall(s.x, s.y);
     const open = DIRS.find(d => !(w & d.bit)) || DIRS[0];
     const yaw = Math.atan2(-open.dx, -open.dy); // camera looks down -Z at yaw 0
@@ -607,7 +607,7 @@ export class World {
     const { w, h, end, exitDir } = this.maze;
     const W = w * CELL, H = h * CELL;
     const R = FIELD_RADIUS;
-    const count = 16000;
+    const count = 70000;
     const a = new THREE.PlaneGeometry(1, 1); const b = a.clone().rotateY(Math.PI / 2);
     const cross = mergeGeometries([a, b]); cross.translate(0, 0.5, 0);
     a.dispose(); b.dispose();
@@ -629,7 +629,7 @@ export class World {
     const inMownPath = (x, z) => {
       const dx = x - ex, dz = z - ez;
       const along = dx * exitDir.dx + dz * exitDir.dy, side = Math.abs(dx * exitDir.dy - dz * exitDir.dx);
-      return along > -1 && along < 16 && side < 3.2;
+      return along > -1 && along < 18 && side < 4.2;
     };
     const pts = [];
     let guard = 0;
@@ -638,15 +638,15 @@ export class World {
       const dOut = Math.max(-x, -z, x - W, z - H);
       if (dOut < 1.6) continue;                       // inside / hugging the maze
       if (inMownPath(x, z)) continue;
-      const keep = 1 - Math.min(1, dOut / R) * 0.85;  // thin out with distance
+      const keep = 1 - Math.min(1, dOut / R) * 0.6;   // thin out with distance
       if (rand() > keep) continue;
       pts.push([x, z, dOut]);
     }
     this.instanced(cross, mat, pts.length, (i, p, e, s, c) => {
       const [x, z, d] = pts[i];
-      const hgt = 1.0 + rand() * 0.7 + Math.min(1, d / 60) * 0.5; // taller further out to fill the horizon
+      const hgt = 3.0 + rand() * 2.1 + Math.min(1, d / 60) * 1.2; // towering wheat, taller further out to fill the horizon
       p.set(x, 0, z); e.set(0, rand() * Math.PI, 0);
-      s.set(hgt * 0.9, hgt, hgt * 0.9);
+      s.set(hgt * 0.75, hgt, hgt * 0.75);
       c.setHSL(0.11 + rand() * 0.03, 0.6 + rand() * 0.2, 0.55 + rand() * 0.2);
       return { color: true };
     });

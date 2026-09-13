@@ -10,7 +10,7 @@ import { AudioSys } from './audio.js';
 const COLORS = ['#3a9f62', '#3b7dd8', '#d8443b', '#e0a52a', '#9b4fd8', '#e56aa8'];
 const MAX_PLAYERS = 6;
 const SEND_RATE = 20; // position updates per second
-const DEFAULT_SETTINGS = { width: 20, height: 20, hedge: 35, braid: 10, signs: 8, honest: 80, torches: 50, time: 'dusk' };
+const DEFAULT_SETTINGS = { width: 20, height: 20, hedge: 35, braid: 15, signs: 8, honest: 80, torches: 50, time: 'dusk', minimap: true };
 const $ = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------------ renderer
@@ -32,9 +32,9 @@ const app = {
   state: 'menu',            // menu | lobby | loading | countdown | playing
   net: null, solo: false, isHost: false,
   me: { id: 'local', name: 'Eyeball', color: COLORS[0] },
-  players: [],              // {id, name, color, ready, host}
+  players: [],              // {id, name, color, host}
   settings: { ...DEFAULT_SETTINGS },
-  local: { shadows: true, minimap: true, volume: 0.7, muted: false },
+  local: { shadows: true, volume: 0.7, muted: false },
   audio: new AudioSys(),
   world: null, sky: null, player: null, remotes: new Map(),
   demo: null, demoToken: 0, demoReady: false,
@@ -55,6 +55,20 @@ function fmtTime(s) { const m = Math.floor(s / 60), r = s - m * 60; return `${St
 function myName() { const v = $('name-input').value.trim().slice(0, 14); return v || 'Eyeball'; }
 function findPlayer(id) { return app.players.find(p => p.id === id); }
 
+/** Event feed (bottom right): joins, leaves, escapes. Entries fade after a while. */
+function logEvent(text, kind = '') {
+  const box = $('events');
+  const el = document.createElement('div');
+  el.className = 'event ' + kind;
+  const t = document.createElement('time');
+  const d = new Date(); t.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  el.appendChild(t); el.appendChild(document.createTextNode(text));
+  box.appendChild(el);
+  while (box.children.length > 6) box.removeChild(box.firstChild);
+  setTimeout(() => el.classList.add('fade'), 9000);
+  setTimeout(() => el.remove(), 10000);
+}
+
 function setProgress(frac, label) {
   for (const id of ['menu-progress', 'load-progress']) {
     const el = $(id); el.querySelector('.fill').style.width = `${Math.round(frac * 100)}%`;
@@ -72,7 +86,7 @@ async function buildDemo() {
   app.demoBuilding = true;
   const token = ++app.demoToken;
   app.demoReady = false; setMenuEnabled(false); setProgress(0, 'Loading…');
-  const maze = generateMaze({ w: 11, h: 11, braid: 0.1, seed: (Math.random() * 1e9) | 0 });
+  const maze = generateMaze({ w: 11, h: 11, braid: 0.15, seed: (Math.random() * 1e9) | 0 });
   const world = new World(scene, maze, { hedge: 26, torches: 40, signs: 3, honest: 100 });
   await world.build((f, l) => { if (token === app.demoToken) setProgress(f, l); });
   app.demoBuilding = false;
@@ -92,8 +106,8 @@ function renderLobby() {
   const list = $('player-list'); list.innerHTML = '';
   for (const p of app.players) {
     const li = document.createElement('li'); if (p.id === app.me.id) li.classList.add('me');
-    li.innerHTML = `<span class="dot" style="--c:${p.color}"></span><span class="pname"></span>${p.host ? '<span class="crown" title="Host">♛</span>' : ''}<span class="ready">${p.ready ? '✓ ready' : ''}</span>`;
-    li.querySelector('.pname').textContent = p.name;
+    li.innerHTML = `<span class="dot" style="--c:${p.color}"></span><span class="pname"></span>${p.host ? '<span class="crown" title="Host">♛</span>' : ''}`;
+    li.querySelector('.pname').textContent = p.name + (p.id === app.me.id ? ' (you)' : '');
     list.appendChild(li);
   }
   $('player-count').textContent = `${app.players.length}/${MAX_PLAYERS}`;
@@ -102,16 +116,16 @@ function renderLobby() {
   $('settings-lock').classList.toggle('hidden', app.isHost);
   $('btn-reset').classList.toggle('hidden', !app.isHost);
   for (const el of document.querySelectorAll('[data-setting]')) {
-    const k = el.dataset.setting; el.value = app.settings[k];
+    const k = el.dataset.setting;
+    if (el.type === 'checkbox') el.checked = !!app.settings[k]; else el.value = app.settings[k];
     const out = $('o-' + k); if (out) out.textContent = app.settings[k];
   }
   $('btn-start').classList.toggle('hidden', !app.isHost);
   $('btn-start').textContent = app.players.length > 1 ? 'Start race' : 'Start solo run';
-  const me = findPlayer(app.me.id);
-  $('btn-ready').textContent = me?.ready ? 'Not ready' : "I'm ready";
   $('lobby-solo-hint').textContent = app.solo ? 'Solo run: no network needed. Tweak the maze and press start.' : 'Share the room code, or start alone for a solo run.';
-  const readyCount = app.players.filter(p => p.ready).length;
-  $('lobby-status').textContent = app.isHost ? `${readyCount}/${app.players.length} ready — you decide when to start.` : 'Waiting for the host to start…';
+  $('lobby-status').textContent = app.isHost
+    ? (app.players.length > 1 ? `${app.players.length} players in — start whenever you like.` : 'Waiting for players… or run it solo.')
+    : 'Waiting for the host to start…';
   app.demo?.sky.setMode(app.settings.time);
 }
 
@@ -142,7 +156,7 @@ async function hostGame(solo = false) {
   app.solo = solo; app.isHost = true;
   if (solo) {
     app.me.id = 'local';
-    app.players = [{ id: 'local', name: app.me.name, color: COLORS[0], ready: true, host: true }];
+    app.players = [{ id: 'local', name: app.me.name, color: COLORS[0], host: true }];
     enterLobby(); return;
   }
   $('menu-status').textContent = 'Creating room…';
@@ -151,10 +165,11 @@ async function hostGame(solo = false) {
   try {
     const code = await net.host();
     app.me.id = net.id;
-    app.players = [{ id: net.id, name: app.me.name, color: COLORS[0], ready: true, host: true }];
+    app.players = [{ id: net.id, name: app.me.name, color: COLORS[0], host: true }];
     $('menu-status').textContent = '';
     enterLobby();
     toast(`Room ${code} created — share the code!`);
+    logEvent(`Room ${code} opened`, 'gold');
   } catch (e) {
     console.error(e); app.net = null;
     $('menu-status').textContent = 'Could not reach the signalling server. Check your connection (or try a solo run).';
@@ -188,9 +203,9 @@ function wireHost(net) {
     const used = new Set(app.players.map(p => p.color));
     const color = COLORS.find(c => !used.has(c)) || COLORS[0];
     const name = String(d?.name || 'Eyeball').slice(0, 14);
-    app.players.push({ id: from, name, color, ready: false, host: false });
+    app.players.push({ id: from, name, color, host: false });
     renderLobby(); broadcastLobby();
-    app.audio.join(); toast(`${name} joined`);
+    app.audio.join(); logEvent(`${name} joined the lobby`);
   });
   net.on('peer-close', (_, from) => {
     const p = findPlayer(from); if (!p) return;
@@ -198,9 +213,8 @@ function wireHost(net) {
     app.posCache.delete(from);
     removeRemote(from);
     renderLobby(); broadcastLobby();
-    app.audio.leave(); toast(`${p.name} left`);
+    app.audio.leave(); logEvent(`${p.name} left`, 'red');
   });
-  net.on('ready', (d, from) => { const p = findPlayer(from); if (p) { p.ready = !!d; renderLobby(); broadcastLobby(); } });
   net.on('p', (d, from) => { if (Array.isArray(d) && d.length === 5) app.posCache.set(from, d); });
   net.on('loaded', (_, from) => { app.loaded.add(from); checkAllLoaded(); });
   net.on('finished', (d, from) => hostFinish(from, Number(d?.time) || 0));
@@ -209,8 +223,14 @@ function wireHost(net) {
 
 function wireClient(net) {
   net.on('lobby', (d) => {
+    const before = new Map(app.players.map(p => [p.id, p]));
     app.players = d.players || []; app.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}) };
-    if (app.state === 'menu') enterLobby(); else renderLobby();
+    if (app.state === 'menu') { enterLobby(); logEvent('You joined the lobby'); }
+    else {
+      renderLobby();
+      for (const p of app.players) if (!before.has(p.id) && p.id !== app.me.id) { logEvent(`${p.name} joined the lobby`); app.audio.join(); }
+      for (const [id, p] of before) if (!app.players.some(x => x.id === id)) { logEvent(`${p.name} left`, 'red'); app.audio.leave(); }
+    }
   });
   net.on('full', () => leaveToMenu('That room is full (6 players max).'));
   net.on('busy', () => leaveToMenu('That race has already started — try again after it ends.'));
@@ -222,7 +242,7 @@ function wireClient(net) {
     for (const e of d.p) { if (e[0] === app.me.id) continue; const r = app.remotes.get(e[0]); if (r) r.push(e[1], e[2], e[3], e[4], e[5], now); }
   });
   net.on('finish', (d) => onFinishEvent(d));
-  net.on('lobby-return', () => { endRace(); enterLobby(); toast('Back to the lobby'); });
+  net.on('lobby-return', () => { endRace(); enterLobby(); logEvent('Host ended the race', 'gold'); });
   net.on('host-lost', () => leaveToMenu('Lost connection to the host.'));
   net.on('error', (e) => console.warn('peer error', e));
 }
@@ -239,7 +259,7 @@ function hostStart() {
 async function startRace(seed, settings) {
   app.settings = { ...DEFAULT_SETTINGS, ...settings };
   app.state = 'loading';
-  showScreen('loading'); $('loading-text').textContent = 'Building the maze';
+  showScreen('loading');
   setProgress(0, 'Starting…');
   disposeDemo();
   app.audio.stopMusic();
@@ -274,8 +294,7 @@ async function startRace(seed, settings) {
   app.race = { seed, startTime: null, finished: [], myFinished: false, revealed: new Uint8Array(maze.w * maze.h) };
   revealAround();
   $('hud-escaped').innerHTML = ''; $('finish-card').classList.add('hidden'); $('banner').classList.add('hidden');
-  $('btn-end-race').classList.toggle('hidden', !app.isHost);
-  $('minimap').classList.toggle('hidden', !app.local.minimap);
+  $('minimap-wrap').classList.toggle('hidden', !app.settings.minimap);
   showScreen(null); $('hud').classList.remove('hidden');
   app.audio.startAmbience();
   app.state = 'countdown';
@@ -306,6 +325,7 @@ function beginCountdown() {
       app.state = 'playing'; if (!app.pauseOpen) app.player.frozen = false;
       app.race.startTime = app.elapsed;
       app.audio.startMusic('game');
+      logEvent('The race is on!', 'gold');
       setTimeout(() => el.classList.add('hidden'), 900);
       if (!app.player.locked) toast('Click the screen to capture the mouse', 3000);
     }
@@ -330,6 +350,7 @@ function onFinishEvent(ev) {
   $('hud-escaped').innerHTML = app.race.finished.map(f => `<div>${f.rank}. <b></b> ${fmtTime(f.time)}</div>`).join('');
   [...$('hud-escaped').querySelectorAll('b')].forEach((b, i) => b.textContent = app.race.finished[i].name);
   const mine = ev.id === app.me.id;
+  logEvent(`${mine ? 'You' : ev.name} escaped #${ev.rank} in ${fmtTime(ev.time)}`, ev.rank === 1 ? 'gold' : '');
   if (ev.rank === 1) { showBanner(mine ? 'You escaped first!' : `${ev.name} escaped first!`); if (!mine) app.audio.chime(); }
   else if (!mine) { showBanner(`${ev.name} escaped (#${ev.rank})`); app.audio.chime(); }
   if (mine) {
@@ -374,13 +395,11 @@ function hostReturnToLobby() {
 // ------------------------------------------------------------------ pause / settings menu (Esc)
 function syncLocalInputs() {
   $('l-shadows').checked = $('p-shadows').checked = app.local.shadows;
-  $('l-minimap').checked = $('p-minimap').checked = app.local.minimap;
   $('l-volume').value = $('p-volume').value = Math.round(app.local.volume * 100);
   $('p-mute').checked = app.local.muted;
 }
 function applyLocal() {
   app.sky?.setShadows(app.local.shadows); app.demo?.sky.setShadows(app.local.shadows);
-  $('minimap').classList.toggle('hidden', !app.local.minimap || !app.race);
   app.audio.setVolume(app.local.volume);
   if (app.audio.muted !== app.local.muted) app.audio.toggleMute();
   syncLocalInputs();
@@ -389,7 +408,7 @@ function openPause() {
   if (!app.race || app.pauseOpen) return;
   app.pauseOpen = true;
   syncLocalInputs();
-  $('btn-abandon').textContent = app.isHost ? (app.players.length > 1 ? 'End race for everyone' : 'Abandon run') : 'Abandon race';
+  $('btn-abandon').textContent = app.isHost ? (app.players.length > 1 ? 'End race for everyone' : 'End run') : 'Abandon race';
   $('pause').classList.remove('hidden');
   app.player.frozen = true;
   if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -426,7 +445,7 @@ function revealAround() {
 }
 
 function drawMinimap() {
-  if (!app.race || !app.world || !app.local.minimap) return;
+  if (!app.race || !app.world || !app.settings.minimap) return;
   const { w, h, walls, end, start } = app.world.maze;
   const rev = app.race.revealed;
   const S = mm.width, cs = S / MM_VIEW;
@@ -439,8 +458,8 @@ function drawMinimap() {
   for (let cy = y0; cy <= y0 + MM_VIEW + 2; cy++) for (let cx = x0; cx <= x0 + MM_VIEW + 2; cx++) {
     if (cx < 0 || cy < 0 || cx >= w || cy >= h || !rev[cy * w + cx]) continue;
     const sx = (cx - ox) * cs, sy = (cy - oz) * cs;
-    const isEnd = cx === end.x && cy === end.y, isStart = cx === start.x && cy === start.y;
-    mctx.fillStyle = isEnd ? 'rgba(95,211,138,0.85)' : isStart ? 'rgba(90,140,220,0.6)' : 'rgba(205,180,130,0.78)';
+    const isEnd = cx === end.x && cy === end.y, isStart = Math.abs(cx - start.x) <= 1 && Math.abs(cy - start.y) <= 1;
+    mctx.fillStyle = isEnd ? 'rgba(108,207,138,0.9)' : isStart ? 'rgba(90,140,220,0.55)' : 'rgba(210,186,135,0.8)';
     mctx.fillRect(sx, sy, cs + 0.5, cs + 0.5);
     const c = walls[cy * w + cx];
     mctx.strokeStyle = '#1e4d2a';
@@ -451,7 +470,6 @@ function drawMinimap() {
     if (c & 2) { mctx.moveTo(sx + cs, sy); mctx.lineTo(sx + cs, sy + cs); }
     mctx.stroke();
   }
-  // other eyeballs, only where you have explored
   for (const [id, r] of app.remotes) {
     if (!r.cur) continue;
     const cx = Math.floor(r.cur.x / CELL), cy = Math.floor(r.cur.z / CELL);
@@ -462,13 +480,11 @@ function drawMinimap() {
     mctx.beginPath(); mctx.arc(sx, sy, 4, 0, 6.28); mctx.fill();
     mctx.strokeStyle = '#000'; mctx.lineWidth = 1; mctx.stroke();
   }
-  // you: an arrow in the centre pointing where you look
   const yaw = app.player.yaw, ang = Math.atan2(-Math.cos(yaw), -Math.sin(yaw));
   mctx.save(); mctx.translate(S / 2, S / 2); mctx.rotate(ang);
-  mctx.fillStyle = '#f0b64a'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1.5;
+  mctx.fillStyle = '#e9b949'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1.5;
   mctx.beginPath(); mctx.moveTo(7, 0); mctx.lineTo(-5, 5); mctx.lineTo(-3, 0); mctx.lineTo(-5, -5); mctx.closePath(); mctx.fill(); mctx.stroke();
   mctx.restore();
-  // north tick
   mctx.fillStyle = 'rgba(255,255,255,0.6)'; mctx.font = 'bold 11px sans-serif'; mctx.textAlign = 'center'; mctx.fillText('N', S / 2, 13);
 }
 
@@ -551,12 +567,6 @@ $('btn-solo').addEventListener('click', () => { app.audio.ensure(); app.audio.cl
 $('btn-join').addEventListener('click', () => { app.audio.ensure(); app.audio.click(); joinGame(); });
 $('code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinGame(); });
 $('btn-leave').addEventListener('click', () => { app.audio.click(); leaveToMenu(); });
-$('btn-ready').addEventListener('click', () => {
-  app.audio.click();
-  const me = findPlayer(app.me.id); if (!me) return;
-  me.ready = !me.ready; renderLobby();
-  if (app.isHost) broadcastLobby(); else app.net?.send('ready', me.ready);
-});
 $('btn-start').addEventListener('click', () => { app.audio.click(); hostStart(); });
 $('btn-reset').addEventListener('click', () => {
   if (!app.isHost) return;
@@ -570,15 +580,13 @@ for (const el of document.querySelectorAll('[data-setting]')) {
   el.addEventListener('input', () => {
     if (!app.isHost) return;
     const k = el.dataset.setting;
-    app.settings[k] = el.tagName === 'SELECT' ? el.value : +el.value;
+    app.settings[k] = el.type === 'checkbox' ? el.checked : (el.tagName === 'SELECT' ? el.value : +el.value);
     const out = $('o-' + k); if (out) out.textContent = app.settings[k];
     if (k === 'time') app.demo?.sky.setMode(app.settings.time);
     broadcastLobby();
   });
 }
-// local settings (lobby + pause menu share the same state)
 for (const id of ['l-shadows', 'p-shadows']) $(id).addEventListener('change', (e) => { app.local.shadows = e.target.checked; applyLocal(); });
-for (const id of ['l-minimap', 'p-minimap']) $(id).addEventListener('change', (e) => { app.local.minimap = e.target.checked; applyLocal(); });
 for (const id of ['l-volume', 'p-volume']) $(id).addEventListener('input', (e) => { app.local.volume = e.target.value / 100; applyLocal(); });
 $('p-mute').addEventListener('change', (e) => { app.local.muted = e.target.checked; applyLocal(); });
 $('btn-resume').addEventListener('click', () => { app.audio.click(); closePause(true); });
@@ -586,16 +594,9 @@ $('btn-abandon').addEventListener('click', () => {
   app.audio.click();
   if (app.isHost) hostReturnToLobby(); else leaveToMenu('You left the race.');
 });
-{
-  const b = document.createElement('button'); b.id = 'btn-end-race'; b.textContent = 'End race'; b.className = 'hidden';
-  b.style.cssText = 'position:absolute;top:14px;right:16px;pointer-events:auto;font-size:13px;padding:6px 12px;';
-  $('hud').appendChild(b);
-  b.addEventListener('click', () => { app.audio.click(); hostReturnToLobby(); });
-}
 document.addEventListener('keydown', (e) => {
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
   if (e.code === 'KeyM') { app.local.muted = !app.local.muted; applyLocal(); toast(app.local.muted ? 'Muted' : 'Sound on', 1200); }
-  if (e.code === 'Tab' && app.race) { e.preventDefault(); app.local.minimap = !app.local.minimap; applyLocal(); }
   if ((e.code === 'Escape' || e.key === 'Escape') && app.race) { if (app.pauseOpen) closePause(true); else if (!app.player.locked && !app.race.myFinished) openPause(); }
 });
 window.addEventListener('beforeunload', () => { app.net?.close(); });

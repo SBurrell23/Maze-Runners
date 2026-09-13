@@ -26,6 +26,11 @@ export function hashString(str) {
 }
 
 /**
+ * Growing-tree maze: from a frontier of carved cells, pick the newest cell some of the
+ * time (long corridors) and a random one otherwise (lots of forks and side passages).
+ * Everyone starts in a 3x3 plaza in the dead centre; the exit is the boundary cell
+ * farthest from it by path length.
+ *
  * @param {{w:number,h:number,braid:number,seed:number}} opts
  *   braid: 0..1 fraction of dead ends that get an extra opening (loops).
  */
@@ -34,44 +39,53 @@ export function generateMaze({ w, h, braid = 0.1, seed = 1 }) {
   const walls = new Uint8Array(w * h).fill(N | E | S | W);
   const idx = (x, y) => y * w + x;
   const inside = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
+  const carve = (x, y, d) => { walls[idx(x, y)] &= ~d.bit; walls[idx(x + d.dx, y + d.dy)] &= ~d.opp; };
 
-  // --- recursive backtracker (iterative) ---
+  const start = { x: w >> 1, y: h >> 1 };
   const visited = new Uint8Array(w * h);
-  const start = { x: 0, y: h - 1 };
-  const stack = [start];
-  visited[idx(start.x, start.y)] = 1;
-  while (stack.length) {
-    const cur = stack[stack.length - 1];
+
+  // --- central plaza (3x3) where everyone spawns; it has several ways out
+  const plaza = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const x = start.x + dx, y = start.y + dy;
+    if (!inside(x, y)) continue;
+    plaza.push({ x, y }); visited[idx(x, y)] = 1;
+  }
+  for (const c of plaza) for (const d of [DIRS[1], DIRS[2]]) {
+    const nx = c.x + d.dx, ny = c.y + d.dy;
+    if (inside(nx, ny) && Math.abs(nx - start.x) <= 1 && Math.abs(ny - start.y) <= 1) carve(c.x, c.y, d);
+  }
+
+  // --- growing tree, seeded from the whole plaza edge
+  const frontier = plaza.slice();
+  const NEWEST = 0.45; // lower = more branching
+  while (frontier.length) {
+    const i = rand() < NEWEST ? frontier.length - 1 : (rand() * frontier.length) | 0;
+    const cur = frontier[i];
     const options = [];
     for (const d of DIRS) {
       const nx = cur.x + d.dx, ny = cur.y + d.dy;
       if (inside(nx, ny) && !visited[idx(nx, ny)]) options.push(d);
     }
-    if (!options.length) { stack.pop(); continue; }
-    // Slight bias towards continuing straight makes longer corridors.
-    const d = options[Math.floor(rand() * options.length)];
+    if (!options.length) { frontier.splice(i, 1); continue; }
+    const d = options[(rand() * options.length) | 0];
+    carve(cur.x, cur.y, d);
     const nx = cur.x + d.dx, ny = cur.y + d.dy;
-    walls[idx(cur.x, cur.y)] &= ~d.bit;
-    walls[idx(nx, ny)] &= ~d.opp;
     visited[idx(nx, ny)] = 1;
-    stack.push({ x: nx, y: ny });
+    frontier.push({ x: nx, y: ny });
   }
 
-  // --- braiding: open some dead ends to create loops ---
+  // --- braiding: open some dead ends to create loops
   if (braid > 0) {
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const c = walls[idx(x, y)];
-      const openings = 4 - ((c & 1) + ((c >> 1) & 1) + ((c >> 2) & 1) + ((c >> 3) & 1));
-      if (openings !== 1 || rand() > braid) continue;
-      const candidates = DIRS.filter(d => (c & d.bit) && inside(x + d.dx, y + d.dy));
+      if (openings(walls[idx(x, y)]) !== 1 || rand() > braid) continue;
+      const candidates = DIRS.filter(d => (walls[idx(x, y)] & d.bit) && inside(x + d.dx, y + d.dy));
       if (!candidates.length) continue;
-      const d = candidates[Math.floor(rand() * candidates.length)];
-      walls[idx(x, y)] &= ~d.bit;
-      walls[idx(x + d.dx, y + d.dy)] &= ~d.opp;
+      carve(x, y, candidates[(rand() * candidates.length) | 0]);
     }
   }
 
-  // --- BFS from start to find distances; pick farthest boundary cell as exit ---
+  // --- BFS from start; exit = farthest boundary cell
   const bfs = (sx, sy) => {
     const dist = new Int32Array(w * h).fill(-1);
     const parent = new Int32Array(w * h).fill(-1);
@@ -91,17 +105,14 @@ export function generateMaze({ w, h, braid = 0.1, seed = 1 }) {
   let best = -1, end = { x: w - 1, y: 0 };
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const onEdge = x === 0 || y === 0 || x === w - 1 || y === h - 1;
-    if (!onEdge || (x === start.x && y === start.y)) continue;
+    if (!onEdge) continue;
     const d = fromStart.dist[idx(x, y)];
     if (d > best) { best = d; end = { x, y }; }
   }
-  // Open the outer wall at the exit cell, preferring a side that is on the boundary.
-  let exitDir = null;
   const edgeDirs = DIRS.filter(d => !inside(end.x + d.dx, end.y + d.dy));
-  exitDir = edgeDirs[Math.floor(rand() * edgeDirs.length)];
+  const exitDir = edgeDirs[(rand() * edgeDirs.length) | 0];
   walls[idx(end.x, end.y)] &= ~exitDir.bit;
 
-  // Solution path (start -> end) and distance-to-exit map (for signs).
   const solution = [];
   for (let i = idx(end.x, end.y); i !== -1; i = fromStart.parent[i]) solution.push(i);
   solution.reverse();
